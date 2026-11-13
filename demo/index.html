@@ -30,10 +30,12 @@
 <div id="pips"></div>
 <div id="fps"></div>
 <div id="hint">Chạm / kéo để bơi · chạm đúp (hoặc Space) để lao</div>
+<script src="goldfish.js"></script>
 <script type="module">
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import GUI from 'lil-gui';
+import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+const { buildGoldPainted, setGoldAniso } = window.GoldfishLib(THREE, { mergeGeometries, mergeVertices });   // goldfish.js (script thường)
 
 // =============================================================================
 // Parameters. Every value marked [APK] was read from the shipped game:
@@ -91,7 +93,8 @@ const P = {
   finFollow: 0.35, finSpringHz: 3.2, finSpringDamp: 0.4,
   // tail section hinge (fraction of length from the nose) and joint softness. Tuned to
   // the reference video: tail tip swings ≈33% of body length peak-to-peak at ~1.5 Hz.
-  tailHinge: 0.62, tailJointSoft: 0.12,   // softer joint → body flows into the tail (was 0.06)
+  // goldfish: the long tail fins start at ≈0.51; softer joint → body flows into the tail
+  tailHinge: 0.53, tailJointSoft: 0.12,
   // FishFins (pectorals): SweepDegrees, SweepSeconds, ReturnSeconds, OpenOnTurn,
   // TurnRateForFullOpen, TurnSmoothSeconds, FlutterDegrees, FlutterHertz                  [APK]
   pecSweep: 40, pecSweepSec: 0.22, pecReturnSec: 0.6, pecOpenOnTurn: 0.7, pecTurnFull: 220, pecTurnSmooth: 0.25,
@@ -117,7 +120,8 @@ const P = {
   driftAmp: 0.05, driftPeriod: 3.2, idleRoll: 4, idlePitch: 3,
   rise: true, riseEvery: [3, 8], riseHeight: [0.12, 0.3], riseUp: 1.1, riseHold: [0.8, 2.0], riseDown: 1.6, risePitch: 60,
   // model: mesh ≈ 0.61 long × Model scale 0.829, centre ≈ 0.235 above ground               [APK]
-  fishLength: 0.5, swimHeight: 0.19,     // low over the sand ("là là"); game model sits at 0.235
+  // goldfish incl. its long tail fins (body ≈ 0.38 m, as before); low over the sand ("là là")
+  fishLength: 0.68, swimHeight: 0.19,
   // obstacles: climb over anything up to maxClimb high, otherwise collide & slide around
   // fishBelly = how far the belly hangs below the fish's centre at its thickest
   // (SH.h·SH.belly ≈ 0.146 for the mesh) — the whole body footprint is kept above low rocks;
@@ -125,7 +129,7 @@ const P = {
   maxClimb: 0.5, climbClear: 0.015, climbUp: 0.26, climbDown: 0.6, climbLook: 0.5,
   // tall rocks ahead: start steering earlier and gentler (avoidLook / avoidSteer), ease the
   // steer in and out over avoidSmooth seconds, and keep the chosen side (no left/right flip)
-  fishRadius: 0.13, fishBelly: 0.15, avoidSteer: 32, avoidLook: 1.4, avoidSmooth: 0.3,
+  fishRadius: 0.13, fishBelly: 0.12, avoidSteer: 32, avoidLook: 1.4, avoidSmooth: 0.3,
   // FloatingJoystick.Radius 168.5 (1080p canvas) ≈ 72 CSS px, DeadZone 0                   [APK]
   joyRadius: 72,
 };
@@ -145,7 +149,6 @@ const scene = new THREE.Scene();
 const BG = new THREE.Color(0.945, 0.918, 0.847);          // CameraRig.Background [APK]
 scene.background = BG;
 scene.fog = new THREE.Fog(BG, 14, 30);
-const envTex = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
 
 const camera = new THREE.PerspectiveCamera(P.camFov, innerWidth / innerHeight, P.camNear, P.camFar);
 
@@ -305,144 +308,42 @@ for (let i = 0; i < 160; i++) {
 }
 
 // =============================================================================
-// Fish model (original design). Every vertex stores `along` (0 nose → 1 tail
-// tip); the vertex shader places it on a spine computed each frame on the CPU.
+// Fish model: bé cá vàng (goldfish.js — the same painted goldfish as creatures.html),
+// baked onto this demo's spine. Every vertex stores `along` (0 nose → 1 tail-fin tip);
+// the vertex shader places it on a spine computed each frame on the CPU.
+// Goldfish model units: x = forward (nose ≈ +0.51), y = up, z = side; the long tail fins
+// reach to x ≈ −1.28. Spine frame: x = side, y = up, `along` = distance from the nose / L.
 // =============================================================================
 const deg = THREE.MathUtils.degToRad;
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
 const smooth = (e0, e1, x) => { const k = clamp01((x - e0) / (e1 - e0)); return k * k * (3 - 2 * k); };
 
-const L = P.fishLength;          // nose → tail-fin tip (m)
-const K = 32;                    // spine samples
-const T_BODY = 0.76;             // body ends, tail fin begins
-// Skeleton of the hero model: Spine_0 (head) … Spine_6, 0.0732 apart, nose→tip = 0.61   [APK]
-// → bone positions along the body 0.28, 0.40 … 1.00. TailFin hinge hangs off Spine_4.
-// The fish's sim position (turn pivot) sits at Spine_0: Model offset 0.1255 + PivotShift −0.149.
-const T_PIVOT = 0.28;
-const BONES = [0.28, 0.40, 0.52, 0.64, 0.76, 0.88, 1.0];
-let T_HINGE = 0.78;   // overwritten from P.tailHinge each frame
+setGoldAniso(Math.min(4, renderer.capabilities.getMaxAnisotropy()));
+const GF = buildGoldPainted();
+GF.updateMatrixWorld(true);
+const GP = GF.userData.parts;
+const gfBox = (o) => new THREE.Box3().setFromObject(o);
+const GF_BOX = gfBox(GP.body).union(GP.fins.reduce((b, f) => b.union(gfBox(f)), new THREE.Box3()));
+const GF_NOSE = GF_BOX.max.x, GF_LEN = GF_BOX.max.x - GF_BOX.min.x;
+const alongOf = (x) => (GF_NOSE - x) / GF_LEN;
 
-const SH = { h: 0.27 * L, w: 0.2 * L, peak: 0.38, ped: 0.32, belly: 1.08 };
+const L = P.fishLength;          // nose → tail-fin tip (m)
+const GS = L / GF_LEN;           // goldfish model unit → metres
+const K = 32;                    // spine samples
+const T_BODY = alongOf(gfBox(GP.body).min.x);   // body ends (≈0.56), the long tail fins begin
+// Turn pivot / head bone just behind the eyes; bones spread evenly from there to the tail tip.
+const T_PIVOT = alongOf(0.15);
+const BONES = Array.from({ length: 7 }, (_, i) => T_PIVOT + (1 - T_PIVOT) * i / 6);
+let T_HINGE = 0.53;   // overwritten from P.tailHinge each frame
+
+// body size for the rock checks (half height / half width at the thickest point, metres)
+const SH = { h: gfBox(GP.body).max.y * GS, w: gfBox(GP.body).max.z * GS, peak: 0.38, ped: 0.32, belly: 1.0 };
 function envelope(t) {
   const u = Math.min(t, T_BODY) / T_BODY;
   if (u < SH.peak) { const k = 1 - u / SH.peak; return Math.pow(Math.max(0, 1 - Math.pow(k, 2.4)), 0.5); }
   const k = (u - SH.peak) / (1 - SH.peak);
   return SH.ped + (1 - SH.ped) * (0.5 + 0.5 * Math.cos(Math.PI * Math.pow(k, 0.85)));
 }
-
-const PAL = {
-  top: 0xff8c1a, side: 0xffb431, belly: 0xfff1cf, cheek: 0xffd27a,
-  fin: 0xff7a3d, finEdge: 0xffd9a0, iris: 0x2b1d14,
-};
-
-function buildBody() {
-  const NS = 64, NR = 32;
-  const pos = [], col = [], along = [], idx = [];
-  const cTop = new THREE.Color(PAL.top), cSide = new THREE.Color(PAL.side), cBelly = new THREE.Color(PAL.belly), cCheek = new THREE.Color(PAL.cheek);
-  const c = new THREE.Color();
-  for (let i = 0; i <= NS; i++) {
-    const t = (i / NS) * T_BODY, e = envelope(t), u = t / T_BODY;
-    const H = SH.h * e, W = SH.w * e * (1 - 0.18 * u);
-    for (let j = 0; j <= NR; j++) {
-      const a = (j / NR) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
-      pos.push(Math.sign(ca) * Math.pow(Math.abs(ca), 0.85) * W,
-               Math.sign(sa) * Math.pow(Math.abs(sa), 0.9) * H * (sa < 0 ? SH.belly : 1), 0);
-      along.push(t);
-      if (sa > 0) c.copy(cSide).lerp(cTop, Math.pow(sa, 1.3)); else c.copy(cSide).lerp(cBelly, Math.pow(-sa, 0.6));
-      // soft cheek patch and darker back towards the tail
-      const cheek = (1 - smooth(0.05, 0.12, Math.abs(u - 0.22))) * (1 - smooth(0.0, 0.5, Math.abs(sa + 0.05)));
-      c.lerp(cCheek, cheek * 0.6);
-      c.multiplyScalar(1 - 0.12 * smooth(0.5, 1, u) * Math.max(0, sa));
-      col.push(c.r, c.g, c.b);
-    }
-  }
-  for (let i = 0; i < NS; i++) for (let j = 0; j < NR; j++) {
-    const a = i * (NR + 1) + j, b = a + NR + 1;
-    idx.push(a, b, a + 1, a + 1, b, b + 1);
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  g.setAttribute('along', new THREE.Float32BufferAttribute(along, 1));
-  g.setAttribute('flex', new THREE.Float32BufferAttribute(new Float32Array(along.length), 1));
-  g.setIndex(idx);
-  // normals from a straight copy (z comes from the spine at runtime)
-  const tmp = g.clone();
-  for (let i = 0; i < along.length; i++) tmp.attributes.position.setZ(i, -along[i] * L);
-  tmp.computeVertexNormals();
-  g.setAttribute('normal', tmp.attributes.normal);
-  return g;
-}
-
-function grid(nu, nv, fn) {
-  const pos = [], uv = [], along = [], flex = [], idx = [];
-  for (let i = 0; i <= nu; i++) for (let j = 0; j <= nv; j++) {
-    const r = fn(i / nu, j / nv);
-    pos.push(r.x, r.y, 0); along.push(r.t); flex.push(r.flex); uv.push(i / nu, j / nv);
-  }
-  for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) {
-    const a = i * (nv + 1) + j, b = a + nv + 1;
-    idx.push(a, b, a + 1, a + 1, b, b + 1);
-  }
-  return { pos, uv, along, flex, idx };
-}
-function mergeGrids(parts) {
-  const out = { pos: [], uv: [], along: [], flex: [], idx: [] };
-  let base = 0;
-  for (const p of parts) {
-    out.pos.push(...p.pos); out.uv.push(...p.uv); out.along.push(...p.along); out.flex.push(...p.flex);
-    for (const i of p.idx) out.idx.push(i + base);
-    base += p.pos.length / 3;
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(out.pos, 3));
-  g.setAttribute('uv', new THREE.Float32BufferAttribute(out.uv, 2));
-  g.setAttribute('along', new THREE.Float32BufferAttribute(out.along, 1));
-  g.setAttribute('flex', new THREE.Float32BufferAttribute(out.flex, 1));
-  g.setAttribute('normal', new THREE.Float32BufferAttribute(out.pos.map((_, i) => (i % 3 === 0 ? 1 : 0)), 3));
-  g.setIndex(out.idx);
-  return g;
-}
-function buildFins() {
-  const topY = (t) => SH.h * envelope(t);
-  // tail fin: broad rounded fan with a gentle notch
-  const tRoot = T_BODY - 0.05;
-  const TAIL_SIZE = 0.9;   // tail fin size (1 = previous size; user asked for 10% smaller)
-  const tail = grid(16, 14, (u, v) => {
-    const vv = v * 2 - 1, av = Math.abs(vv);
-    const lenF = (1 - 0.14 * Math.pow(1 - av, 2) - 0.1 * av * av) * TAIL_SIZE;
-    // slight cup: the fin's mid-line bows sideways a little so it reads from above
-    const cup = 0.035 * L * TAIL_SIZE * Math.pow(u, 1.5) * (1 - vv * vv);
-    return { x: cup, y: vv * THREE.MathUtils.lerp(SH.h * SH.ped * 0.95, 0.4 * L * TAIL_SIZE, Math.pow(u, 0.6)), t: tRoot + u * lenF * (1 - tRoot), flex: u };
-  });
-  // dorsal fin: soft arc
-  const dorsal = grid(12, 5, (u, v) => {
-    const t = 0.24 + u * 0.36;
-    const h = 0.13 * L * Math.pow(Math.sin(Math.PI * Math.min(1, u * 1.05)), 0.7) * (1 - 0.3 * u);
-    return { x: 0, y: topY(t) * 0.9 + v * h, t: t + v * 0.05, flex: v * 0.7 };
-  });
-  // anal fin
-  const anal = grid(8, 4, (u, v) => {
-    const t = 0.5 + u * 0.16;
-    const h = 0.07 * L * Math.pow(Math.sin(Math.PI * u), 0.7);
-    return { x: 0, y: -topY(t) * SH.belly * 0.9 - v * h, t: t + v * 0.03, flex: v * 0.7 };
-  });
-  return mergeGrids([tail, dorsal, anal]);
-}
-
-const finTex = (() => {
-  const c = document.createElement('canvas'); c.width = c.height = 256;
-  const g = c.getContext('2d');
-  // mostly opaque fin that warms to a deeper red-orange towards the edge, so the
-  // fin reads clearly against the sand even when the fish is small on screen
-  const grd = g.createLinearGradient(0, 0, 256, 0);
-  grd.addColorStop(0, 'rgb(255,255,255)'); grd.addColorStop(0.55, 'rgb(255,236,214)');
-  grd.addColorStop(0.8, 'rgb(236,150,110)'); grd.addColorStop(1, 'rgb(200,90,60)');
-  g.fillStyle = grd; g.fillRect(0, 0, 256, 256);
-  g.strokeStyle = 'rgba(255,255,255,0.45)'; g.lineWidth = 2.5;
-  for (let y = 8; y < 256; y += 20) { g.beginPath(); g.moveTo(0, 128 + (y - 128) * 0.3); g.lineTo(200, 128 + (y - 128) * 0.85); g.stroke(); }
-  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
-})();
 
 // ---- spine deformation shader ------------------------------------------------
 const uni = { uSpine: { value: Array.from({ length: K + 1 }, (_, i) => new THREE.Vector3(0, -i / K * L, 0)) }, uPhase: { value: 0 }, uFlutter: { value: 0.006 } };
@@ -456,25 +357,48 @@ const SPINE_GLSL = `
     int i = int(min(floor(s), ${K - 1}.0));
     return mix(uSpine[i], uSpine[i + 1], s - float(i));
   }`;
-function spineMat(mat, rim) {
+const SPINE_NORMAL = `
+  { vec3 sp = spineAt(along); float c = cos(sp.z), sn = sin(sp.z);
+    objectNormal = vec3(objectNormal.x*c - objectNormal.z*sn, objectNormal.y, objectNormal.x*sn + objectNormal.z*c); }`;
+function spineMat(mat) {
   mat.onBeforeCompile = (s) => {
     Object.assign(s.uniforms, uni);
     s.vertexShader = s.vertexShader
       .replace('#include <common>', '#include <common>\n' + SPINE_GLSL)
-      .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
-        { vec3 sp = spineAt(along); float c = cos(sp.z), sn = sin(sp.z);
-          objectNormal = vec3(objectNormal.x*c - objectNormal.z*sn, objectNormal.y, objectNormal.x*sn + objectNormal.z*c); }`)
+      .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>' + SPINE_NORMAL)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         { vec3 sp = spineAt(along); float c = cos(sp.z), sn = sin(sp.z);
           float ox = position.x + flex * sin(uPhase * 1.5 - along * 10.0 + position.y * 40.0) * uFlutter;
           transformed = vec3(sp.x + ox*c, position.y, sp.y + ox*sn); }`);
-    if (rim) s.fragmentShader = s.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
-        { float r = 1.0 - clamp(dot(-normalize(vViewPosition), normal), 0.0, 1.0);
-          totalEmissiveRadiance += vec3(1.0,0.96,0.88) * pow(r, 3.0) * 0.12; }`);
   };
-  mat.customProgramCacheKey = () => 'spine' + (rim ? 'r' : '');
+  mat.customProgramCacheKey = () => 'spine';
   return mat;
 }
+
+// Goldfish mesh → spine geometry (positions in metres, `along` / `flex` added). Offsets
+// (aOpen / aClose, mouth) and normals (aNrmC) are turned into the spine frame as well.
+const _bv = new THREE.Vector3(), _bn = new THREE.Vector3(), _nm = new THREE.Matrix3();
+function bakeSpine(mesh, flexOf = () => 0) {
+  const g = mesh.geometry.clone(), M = mesh.matrixWorld;
+  _nm.getNormalMatrix(M);
+  const pos = g.attributes.position, nrm = g.attributes.normal, n = pos.count;
+  const along = new Float32Array(n), flex = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    _bv.fromBufferAttribute(pos, i).applyMatrix4(M);
+    along[i] = alongOf(_bv.x); flex[i] = flexOf(_bv, along[i]);
+    pos.setXYZ(i, -_bv.z * GS, _bv.y * GS, 0);
+    if (nrm) { _bn.fromBufferAttribute(nrm, i).applyMatrix3(_nm).normalize(); nrm.setXYZ(i, -_bn.z, _bn.y, _bn.x); }
+  }
+  for (const [name, k] of [['aOpen', GS], ['aClose', GS], ['aNrmC', 1]]) {
+    const a = g.attributes[name]; if (!a) continue;
+    for (let i = 0; i < a.count; i++) { const x = a.getX(i), y = a.getY(i), z = a.getZ(i); a.setXYZ(i, -z * k, y * k, x * k); }
+  }
+  g.setAttribute('along', new THREE.BufferAttribute(along, 1));
+  g.setAttribute('flex', new THREE.BufferAttribute(flex, 1));
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), L * 2);
+  return g;
+}
+const paintedProps = (m) => ({ map: m.map, emissiveMap: m.emissiveMap, emissive: m.emissive, emissiveIntensity: m.emissiveIntensity });
 
 // ---- assemble ------------------------------------------------------------------
 const fish = new THREE.Group();     // position + yaw
@@ -483,61 +407,59 @@ tilt.rotation.order = 'YXZ';
 fish.add(tilt);
 scene.add(fish);
 
-const body = new THREE.Mesh(buildBody(), spineMat(new THREE.MeshPhysicalMaterial({
-  vertexColors: true, roughness: 0.45, clearcoat: 0.35, clearcoatRoughness: 0.35, envMap: envTex, envMapIntensity: 0.08,
-}), true));
-const fins = new THREE.Mesh(buildFins(), spineMat(new THREE.MeshStandardMaterial({
-  color: PAL.fin, emissive: PAL.fin, emissiveIntensity: 0.25, map: finTex, emissiveMap: finTex, opacity: 0.97,
-  transparent: true, side: THREE.DoubleSide, roughness: 0.5, depthWrite: false,
-}), false));
-for (const m of [body, fins]) {
-  m.castShadow = true; m.frustumCulled = false;
-  m.customDepthMaterial = spineMat(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }), false);
+// body: painted skin + 3D lips; the mouth opens with uMouth (same attributes as goldfish.js)
+const bodyMat = new THREE.MeshLambertMaterial({ ...paintedProps(GP.body.material), side: THREE.BackSide });
+bodyMat.onBeforeCompile = (s) => {
+  Object.assign(s.uniforms, uni); s.uniforms.uMouth = GP.uMouth;
+  s.vertexShader = s.vertexShader
+    .replace('#include <common>', '#include <common>\n' + SPINE_GLSL +
+      '\nattribute vec4 aLip; attribute float aAO; attribute vec3 aOpen; attribute vec3 aClose; attribute vec3 aNrmC; uniform float uMouth; varying vec4 vLip; varying float vAO;')
+    .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\nobjectNormal = normalize(mix(aNrmC, objectNormal, uMouth));' + SPINE_NORMAL)
+    .replace('#include <begin_vertex>', `#include <begin_vertex>
+      { vec3 mo = aOpen * uMouth + aClose * (1.0 - uMouth);
+        vec3 sp = spineAt(along - mo.z / ${L.toFixed(5)}); float c = cos(sp.z), sn = sin(sp.z);
+        float ox = position.x + mo.x;
+        transformed = vec3(sp.x + ox*c, position.y + mo.y, sp.y + ox*sn); vLip = aLip; vAO = aAO; }`);
+  s.fragmentShader = s.fragmentShader
+    .replace('#include <common>', '#include <common>\nvarying vec4 vLip; varying float vAO;')
+    .replace('#include <map_fragment>', `#ifdef USE_MAP
+        vec4 sampledDiffuseColor = texture2D( map, vMapUv );
+        diffuseColor.rgb *= mix( sampledDiffuseColor.rgb, vLip.rgb, vLip.a ) * vAO;
+      #endif`)
+    .replace('#include <emissivemap_fragment>', `#ifdef USE_EMISSIVEMAP
+        vec4 emissiveColor = texture2D( emissiveMap, vEmissiveMapUv );
+        totalEmissiveRadiance *= mix( emissiveColor.rgb, vLip.rgb, vLip.a ) * vAO;
+      #endif`);
+};
+bodyMat.customProgramCacheKey = () => 'goldSpineBody';
+const body = new THREE.Mesh(bakeSpine(GP.body), bodyMat);
+body.customDepthMaterial = spineMat(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }));
+const parts = [body];
+// fins (tail lobes, dorsal, small belly fins): the tail flutters more towards its tip
+for (const f of GP.fins) {
+  const m = new THREE.Mesh(bakeSpine(f, (v, a) => 0.25 + 0.75 * smooth(T_BODY - 0.08, 1, a)),
+    spineMat(new THREE.MeshLambertMaterial({ ...paintedProps(f.material), transparent: true, depthWrite: false, side: THREE.DoubleSide, alphaTest: 0.02 })));
+  m.customDepthMaterial = spineMat(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: f.material.map, alphaTest: 0.5 }));
+  m.renderOrder = 1;
+  parts.push(m);
 }
-fins.renderOrder = 1;
-tilt.add(body, fins);
+for (const m of parts) { m.castShadow = true; m.frustumCulled = false; }
+tilt.add(...parts);
 
-// eyes with lids (FishEyelids → occasional blink)
-const eyeWhite = new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.15, clearcoat: 1, envMap: envTex, envMapIntensity: 0.4 });
-const eyes = [];
-for (const sx of [-1, 1]) {
-  const r = 0.085 * L;
-  const g = new THREE.Group();
-  g.add(new THREE.Mesh(new THREE.SphereGeometry(r, 24, 16), eyeWhite));
-  const iris = new THREE.Mesh(new THREE.SphereGeometry(r * 0.64, 20, 14), new THREE.MeshStandardMaterial({ color: PAL.iris, roughness: 0.25 }));
-  iris.scale.z = 0.5; iris.position.z = r * 0.72;
-  const g1 = new THREE.Mesh(new THREE.SphereGeometry(r * 0.2, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffffff }));
-  g1.position.set(r * 0.22, r * 0.28, r * 0.98);
-  const g2 = new THREE.Mesh(new THREE.SphereGeometry(r * 0.09, 8, 6), g1.material);
-  g2.position.set(-r * 0.2, -r * 0.18, r * 1.0);
-  const lid = new THREE.Mesh(new THREE.SphereGeometry(r * 1.06, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshStandardMaterial({ color: PAL.top, roughness: 0.5 }));
-  lid.rotation.x = -Math.PI / 2;  // dome faces forward; scaled to close
-  lid.scale.y = 0.001;
-  g.add(iris, g1, g2, lid);
-  g.userData = { sx, t: 0.13, y: SH.h * 0.3, lid };
-  tilt.add(g); eyes.push(g);
+// Rigid goldfish parts (eye domes, pectoral fins) ride on the spine: a holder sits on the spine
+// point at `t` facing along it; inside, `conv` turns goldfish axes into the spine frame.
+function spineHolder(src) {
+  const holder = new THREE.Group(), conv = new THREE.Group();
+  conv.rotation.y = -Math.PI / 2; conv.scale.setScalar(GS);
+  const obj = src.clone(); obj.position.x = 0;   // forward position comes from the spine
+  conv.add(obj); holder.add(conv); tilt.add(holder);
+  holder.userData = { t: alongOf(src.position.x), obj };
+  return holder;
 }
-// mouth (FishJaw → small idle open/close)
-const mouth = new THREE.Mesh(new THREE.SphereGeometry(0.022 * L / 0.5, 14, 8), new THREE.MeshStandardMaterial({ color: 0x6b2410, roughness: 0.6 }));
-mouth.scale.set(1.6, 0.35, 0.5);
-tilt.add(mouth);
-// pectoral fins
-const pecGeo = (() => {
-  const g = grid(6, 4, (u, v) => ({ x: u * 0.27 * L * (1 - 0.35 * Math.pow(Math.abs(v * 2 - 1), 2)), y: (v - 0.5) * 0.2 * L * (0.45 + u * 0.75), t: 0, flex: 0 }));
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(g.pos, 3));
-  geo.setAttribute('uv', new THREE.Float32BufferAttribute(g.uv, 2));
-  geo.setIndex(g.idx); geo.computeVertexNormals();
-  return geo;
-})();
-const pecMat = new THREE.MeshStandardMaterial({ color: PAL.fin, emissive: PAL.fin, emissiveIntensity: 0.35, map: finTex, emissiveMap: finTex, transparent: true, side: THREE.DoubleSide, depthWrite: false });
-const pecs = [];
-for (const sx of [-1, 1]) {
-  const pivot = new THREE.Group();
-  const m = new THREE.Mesh(pecGeo, pecMat); m.scale.x = sx; m.castShadow = true;
-  pivot.add(m); pivot.userData = { sx, t: 0.3, y: -SH.h * 0.3 };
-  tilt.add(pivot); pecs.push(pivot);
-}
+// eyes (FishEyelids → occasional blink: the painted eye swaps to the closed one)
+const eyes = GP.eyes.map((e) => spineHolder(e));
+// pectoral fins: the goldfish fin rests swept back; it paddles and folds about its root
+const pecs = GP.pecs.map(({ pv, side }) => { const h = spineHolder(pv); h.userData.side = side; h.userData.sx = -side; h.userData.obj.children[0].castShadow = true; return h; });
 
 // =============================================================================
 // Animation state & the decompiled behaviours
@@ -859,30 +781,26 @@ function attachParts(t, dt) {
   if (S.blink <= 0) { S.blinkT = 0.16; S.blink = rand(1.4, 3.2); }   // FishEyelids interval [APK]
   S.blinkT = Math.max(0, S.blinkT - dt);
   const lidK = S.blinkT > 0 ? Math.sin((1 - S.blinkT / 0.16) * Math.PI) : 0;
-  for (const e of eyes) {
-    const d = e.userData, sp = spineAt(d.t), W = SH.w * envelope(d.t) * 0.86;
-    e.position.set(sp.x + d.sx * W * Math.cos(sp.th), d.y, sp.z + d.sx * W * Math.sin(sp.th));
-    e.rotation.set(0, -sp.th + d.sx * (Math.PI / 2 - 0.55), 0);
-    d.lid.scale.y = Math.max(0.001, lidK);
+  const eyeMat = lidK > 0.5 ? GP.eyeMats.e_closed : GP.eyeMats.e_normal;
+  for (const e of [...eyes, ...pecs]) {
+    const sp = spineAt(e.userData.t);
+    e.position.set(sp.x, 0, sp.z); e.rotation.set(0, -sp.th, 0);
   }
+  for (const e of eyes) e.userData.obj.material = eyeMat;
   for (const p of pecs) {
-    const d = p.userData, sp = spineAt(d.t), W = SH.w * envelope(d.t) * 0.9;
-    p.position.set(sp.x + d.sx * W * Math.cos(sp.th), d.y, sp.z + d.sx * W * Math.sin(sp.th));
-    // FishFins.Pose: rest pose angled pecRest° back from straight out, swept further back by
-    // SweepDegrees·fold, plus a paddle stroke (right fin +90°). Positive yaw·sx = towards the
-    // tail. The stroke swings sideways ↔ back; on the return (forward) half the fin feathers
-    // edge-on (rotation about its own long axis) so it pushes water backwards only.
-    const ph = S.flutter + (d.sx > 0 ? Math.PI / 2 : 0);
+    // FishFins.Pose on the goldfish fin (rests swept back, yaw · side > 0 opens it outwards):
+    // SweepDegrees·fold folds it back against the body, plus a paddle stroke (right fin +90°)
+    // and an edge-on twist (feather) on the return half of the stroke.
+    const d = p.userData, ph = S.flutter + (d.sx > 0 ? Math.PI / 2 : 0);
     const flutter = deg(P.pecFlutter) * Math.sin(ph);
     const feather = deg(P.pecFeather) * smooth(0, 1, Math.max(0, -Math.cos(ph)));
     const sweep = deg(P.pecSweep) * S.pecPose;
-    p.rotation.set(feather, -sp.th + d.sx * (deg(P.pecRest) + sweep + flutter * 4), d.sx * (-0.35 + flutter * 3), 'YZX');
+    d.obj.rotation.y = d.side * (0.3 + deg(25 - P.pecRest) - sweep * 0.6 + flutter * 4);
+    d.obj.rotation.z = feather * 0.4 * d.side;
   }
-  // jaw: slow idle breathing
+  // mouth: slow idle breathing, opens wide on the dash lunge
   S.jaw += dt * 2.2;
-  const sp = spineAt(0);
-  mouth.position.set(sp.x, -SH.h * 0.18, sp.z - 0.004);
-  mouth.scale.y = 0.3 + 0.25 * (0.5 + 0.5 * Math.sin(S.jaw)) * (1 - 0.6 * S.swim) + 1.1 * S.dashOpen;
+  GP.uMouth.value = clamp01(0.1 * (0.5 + 0.5 * Math.sin(S.jaw)) * (1 - 0.6 * S.swim) + S.dashOpen);
 }
 
 function step(input, dt, t) {
@@ -1161,7 +1079,7 @@ function bubbleStep(dt) {
   while (bubAcc > 1) {
     bubAcc -= 1;
     // a little cluster of 1–3 from alternating fins, released a few frames apart
-    pecs[bubI & 1].getWorldPosition(_p);
+    pecs[bubI & 1].userData.obj.getWorldPosition(_p);
     const n = Math.random() < 0.45 ? 1 : Math.random() < 0.7 ? 2 : 3;
     for (let j = 0; j < n; j++) spawnBubble(_p, j * rand(0.04, 0.09));
   }
@@ -1238,14 +1156,15 @@ finTrMesh.frustumCulled = false; finTrMesh.renderOrder = 2;
 scene.add(finTrMesh);
 const finTrails = Array.from({ length: TRAIL_EMIT }, () => []);   // [{ p: Vector3, age, k }]
 const _tv = new THREE.Vector3(), _tt = new THREE.Vector3(), _ts = new THREE.Vector3(), _tc = new THREE.Vector3();
-const TAIL_TIP_T = 0.945, TAIL_TIP_Y = 0.4 * L * 0.9;          // tail-fin lobe tips (see buildFins)
+// tail-fin lobe tips: upper lobe (fins[0]) and lower lobe (fins[1]) of the goldfish tail
+const TAIL_TIP_T = alongOf(GF_BOX.min.x + 0.04 * GF_LEN), TAIL_TIP_Y = [gfBox(GP.fins[0]).max.y * GS * 0.9, gfBox(GP.fins[1]).min.y * GS * 0.9];
 function finTip(e, out) {
   if (e < 2) {                                                 // tail lobes ride on the spine
     const sp = spineAt(TAIL_TIP_T);
-    return tilt.localToWorld(out.set(sp.x, (e === 0 ? 1 : -1) * TAIL_TIP_Y * 0.92, sp.z));
+    return tilt.localToWorld(out.set(sp.x, TAIL_TIP_Y[e], sp.z));
   }
-  const m = pecs[e - 2].children[0];                           // pectoral fin tip (scale.x = ±1)
-  return m.localToWorld(out.set(0.25 * L, 0, 0));
+  const m = pecs[e - 2].userData.obj.children[0];              // pectoral fin tip (the fin runs back along −x)
+  return m.localToWorld(out.set(-0.33, 0, 0));
 }
 // smoothed points (Catmull-Rom through the history) — reused, no per-frame allocation
 const trPts = Array.from({ length: TR_N }, () => ({ x: 0, y: 0, z: 0, age: 0, k: 0 }));
@@ -1405,7 +1324,7 @@ function fxStep(dt) {
   const sp = spineAt(1);
   tilt.localToWorld(_tail.set(sp.x, 0, sp.z));
   trailStep(trails[0], _tail, on ? fx.amt : 0, dt);
-  for (let i = 0; i < 2; i++) { pecs[i].getWorldPosition(_pec); trailStep(trails[i + 1], _pec, on ? fx.amt : 0, dt); }
+  for (let i = 0; i < 2; i++) { pecs[i].userData.obj.getWorldPosition(_pec); trailStep(trails[i + 1], _pec, on ? fx.amt : 0, dt); }
   // rings expand and fade
   for (const r of rings) {
     if (!r.m.visible) continue;
@@ -1586,7 +1505,7 @@ gt.add(P, 'headDegrees', 0, 20, 0.5).name('HeadDegrees');
 gt.add(P, 'lagDegrees', -90, 90, 1).name('LagDegrees');
 gt.add(P, 'cruiseSpeed', 0.5, 8, 0.05).name('cruiseAnimationSpeed');
 gt.add(P, 'finFollow', 0, 1, 0.05).name('fin follow-through');
-gt.add(P, 'tailHinge', 0.5, 0.85, 0.01).name('tail hinge (0.62 = video)');
+gt.add(P, 'tailHinge', 0.4, 0.85, 0.01).name('tail hinge');
 gt.add(P, 'tailJointSoft', 0.01, 0.15, 0.005).name('tail joint softness');
 const gn = gui.addFolder('Body motion');
 gn.add(P, 'motion', { 'natural (body wave)': 'natural', 'game formula (raw)': 'game' }).name('model');
