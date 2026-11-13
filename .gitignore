@@ -1,0 +1,7 @@
+# Tài liệu tham khảo, không đưa lên repo
+*.xapk
+*.apk
+*.mp4
+
+# Bản sao lưu
+*.backup.html

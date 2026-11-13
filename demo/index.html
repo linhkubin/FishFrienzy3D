@@ -1,0 +1,1559 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>Fish Swim Demo</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#f1ead8;touch-action:none;user-select:none;-webkit-user-select:none;font-family:system-ui,sans-serif}
+  canvas{display:block}
+  #joy{position:fixed;left:0;top:0;pointer-events:none;display:none}
+  #joyBase{position:absolute;border-radius:50%;background:rgba(255,255,255,.22);border:3px solid rgba(255,255,255,.65);box-sizing:border-box;transform:translate(-50%,-50%)}
+  #joyKnob{position:absolute;width:58px;height:58px;border-radius:50%;background:rgba(255,255,255,.92);box-shadow:0 2px 10px rgba(0,0,0,.2);transform:translate(-50%,-50%)}
+  #fps{position:fixed;left:10px;top:10px;color:#5b4d36;background:rgba(255,255,255,.7);padding:3px 8px;border-radius:8px;font:12px ui-monospace,monospace;pointer-events:none;display:none}
+  #pips{position:fixed;right:24px;bottom:24px;display:flex;gap:7px;pointer-events:none;transition:opacity .2s}
+  #pips.empty{opacity:.5}
+  #pips i{width:16px;height:16px;border-radius:50%;background:rgba(255,255,255,.5);border:2px solid rgba(255,255,255,.95);box-sizing:border-box;position:relative;overflow:hidden}
+  #pips i b{position:absolute;left:0;bottom:0;width:100%;height:0;background:#e8743b}
+  #hint{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);color:#5b4d36;background:rgba(255,255,255,.7);padding:6px 14px;border-radius:14px;font-size:14px;pointer-events:none;transition:opacity .6s;white-space:nowrap}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/",
+  "lil-gui": "https://unpkg.com/lil-gui@0.19.2/dist/lil-gui.esm.min.js"
+}}
+</script>
+</head>
+<body>
+<div id="joy"><div id="joyBase"></div><div id="joyKnob"></div></div>
+<div id="pips"></div>
+<div id="fps"></div>
+<div id="hint">Chạm / kéo để bơi · chạm đúp (hoặc Space) để lao</div>
+<script type="module">
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import GUI from 'lil-gui';
+
+// =============================================================================
+// Parameters. Every value marked [APK] was read from the shipped game:
+// serialized component values (CameraRig, FishTailSway, FishSwimMotion,
+// FloatingJoystick) or constants in decompiled ARMv7 code.
+// =============================================================================
+const P = {
+  // CameraRig.Apply: pos = focus + Euler(RotationOffset)·(PositionOffset·Zoom)          [APK]
+  camPitch: 37.5, camDistance: 9.95, camFov: 38, camNear: 0.05, camFar: 60,
+  camSmooth: 0.22,         // focus SmoothDamp time (s) — estimate
+  // control feel (demo smoothing on top of the game's instant sim velocity)
+  // joystick: no input smoothing; swim direction follows the stick angle fast
+  // steerInstant = game behaviour: swim direction & speed follow the stick in the same
+  // frame (Sim.TickPlayerMovement); only the model turns via HeadingSmoother (997°/s).
+  steerInstant: true, stickSmooth: 0, steerRate: 1800, steerSmooth: 0.025, velSmooth: 0, steerMinStick: 0.08,
+  // Sim.TickPlayerMovement: velocity = stick · 165 sim/s, WorldSpace scale 0.01 → 1.65 m/s, instant  [APK]
+  speed: 1.65,
+  // dash / lunge (design doc "Lao đớp"): bursts ~3 body lengths straight ahead, eased out.
+  // Costs one stamina charge; charges refill one at a time.
+  // Speed rises smoothly to a peak at 1/3 of the dash and glides out (no instant jolt).
+  dashDist: 2.6, dashTime: 0.55, dashCharges: 3, dashRegen: 2.5, dashTailBoost: 1.6, dashBuffer: 0.15,
+  dashSteer: 260,          // °/s the stick can turn the fish while dashing
+  stopSmooth: 0.35,        // s: glide to a stop instead of halting instantly
+  pillars: false,          // test layout with tall rock pillars (false = original open map)
+  bubbleSize: 2.8, bubbleRate: 1.6,   // swim bubbles: size and amount multipliers
+  showFps: false, autoQuality: true,   // fps meter; lower resolution/shadows if frames drop
+  dashFx: true, dashFov: 5, // dash effects on/off; camera FOV kick (°) at the dash peak
+  // double tap: second press within dblTapMs of a quick tap (shorter than tapMs, moved
+  // less than tapMove px), at most dblTapDist px away. A released stick keeps steering
+  // for joyGraceMs, so a double tap mid-swim doesn't reset the direction.
+  dblTapMs: 300, dblTapDist: 90, tapMs: 220, tapMove: 18, joyGraceMs: 320,
+  // HeadingSmoother + PlayerAntRig._turning (hero prefab): MaxTurnRate 997°/s, TurnSmoothTime 0.024 s [APK]
+  rig: 'hero', turnRate: 997, turnSmooth: 0.024,
+  // AntView.WalkAnimationSpeed = v/165 · 1 · 4.15 → Animator "MovementAnimationSpeed" (damped)  [APK]
+  animDamp: 0.1,           // Animator SetFloat damp time — estimate
+  // FishTailSway: Degrees, Seconds, AtRest, BlendSeconds, BodyDegrees, HeadDegrees, LagDegrees, cruise  [APK]
+  tailDegrees: 26, tailSeconds: 0.65, atRest: 0.3, tailBlend: 0.6,
+  // body motion model: 'natural' (travelling body wave + recoil + path-following turn curl)
+  // or 'game' (FishTailSway formula exactly as decompiled — body barely moves, ±5° mid-body)
+  // reference video (Fish.mp4): the body stays rigid; life comes from tail-fin flick,
+  // pectoral flapping and strong roll in turns → default to the decompiled game formula
+  motion: 'game',
+  // natCurl 0 = like the game (hero fish has no turn clip, the body stays straight while it turns)
+  natHead: 3, natTail: 24, natWave: 0.95, natRecoil: 3,
+  // soft turn curl (procedural spring chain): 0 = rigid like the game's hero fish
+  // tuned at 60fps: 90° turn → tail ~33°, mid-body ~17°, small whip (~2–3°), settles ~0.3 s
+  natCurl: 0, curlHz: 13, curlDamp: 0.6, curlLoose: 0.3,
+  // game mode: turn bend only on the tail section (video: rigid front, tail lags & whips)
+  turnTailBend: 1.2, turnBendStart: 0.38, stalkCurve: 0.45,
+  // extra fold for U-turns (≈180°): gain grows as the tail trails the head by 70°→170°
+  curlBigTurn: 0.7, curlMaxFold: 90,
+  // fin follow-through (demo addition on top of the game's hinge, 0 = rigid like the raw formula)
+  finFollow: 0.35, finSpringHz: 3.2, finSpringDamp: 0.4,
+  // tail section hinge (fraction of length from the nose) and joint softness. Tuned to
+  // the reference video: tail tip swings ≈33% of body length peak-to-peak at ~1.5 Hz.
+  tailHinge: 0.62, tailJointSoft: 0.12,   // softer joint → body flows into the tail (was 0.06)
+  // FishFins (pectorals): SweepDegrees, SweepSeconds, ReturnSeconds, OpenOnTurn,
+  // TurnRateForFullOpen, TurnSmoothSeconds, FlutterDegrees, FlutterHertz                  [APK]
+  pecSweep: 40, pecSweepSec: 0.22, pecReturnSec: 0.6, pecOpenOnTurn: 0.7, pecTurnFull: 220, pecTurnSmooth: 0.25,
+  // game value FlutterDegrees 1.5; the video shows clearly visible flapping, so the demo
+  // uses a larger stroke on its (smaller) fins
+  pecFlutter: 6, pecFlutterHz: 1.6,
+  // rest angle back from straight out (°), and edge-on twist on the return stroke (°)
+  pecRest: 25, pecFeather: 55,
+  // bodyDegrees raised from 12 so the mid-body → tail stalk visibly curves, not just the fin
+  bodyDegrees: 22, headDegrees: 6, lagDegrees: 35, cruiseSpeed: 4.15,
+  // FishSwimMotion: WagHertz, IdleSwayDegrees, IdleBob, IdleHertz, BlendSeconds            [APK]
+  wagHertz: 2.4, idleSway: 2.5, idleBob: 0.006, idleHertz: 0.55, swimBlend: 0.22,
+  // FishSwimMotion.TickBank: BankPerTurnRate, MaxBankDegrees, BankSmoothSeconds              [APK]
+  // game: MaxBankDegrees 20; the video shows the fish rolling much further in turns
+  bankPerTurnRate: 0.06, maxBank: 35, bankSmooth: 0.09,
+  // FishSwimMotion.TickRise: RiseEvery, RiseHeight, RiseUp, RiseHold, RiseDown, RisePitchPerSpeed [APK]
+  rise: true, riseEvery: [3, 8], riseHeight: [0.12, 0.3], riseUp: 1.1, riseHold: [0.8, 2.0], riseDown: 1.6, risePitch: 60,
+  // model: mesh ≈ 0.61 long × Model scale 0.829, centre ≈ 0.235 above ground               [APK]
+  fishLength: 0.5, swimHeight: 0.19,     // low over the sand ("là là"); game model sits at 0.235
+  // obstacles: climb over anything up to maxClimb high, otherwise collide & slide around
+  // fishBelly = how far the belly hangs below the fish's centre at its thickest
+  // (SH.h·SH.belly ≈ 0.146 for the mesh) — the whole body footprint is kept above low rocks;
+  // climbUp is a little slower so it eases up instead of popping up.
+  maxClimb: 0.5, climbClear: 0.015, climbUp: 0.26, climbDown: 0.6, climbLook: 0.5,
+  // tall rocks ahead: start steering earlier and gentler (avoidLook / avoidSteer), ease the
+  // steer in and out over avoidSmooth seconds, and keep the chosen side (no left/right flip)
+  fishRadius: 0.13, fishBelly: 0.15, avoidSteer: 32, avoidLook: 1.4, avoidSmooth: 0.3,
+  // FloatingJoystick.Radius 168.5 (1080p canvas) ≈ 72 CSS px, DeadZone 0                   [APK]
+  joyRadius: 72,
+};
+
+// =============================================================================
+// Renderer / scene
+// =============================================================================
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const BG = new THREE.Color(0.945, 0.918, 0.847);          // CameraRig.Background [APK]
+scene.background = BG;
+scene.fog = new THREE.Fog(BG, 14, 30);
+const envTex = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(P.camFov, innerWidth / innerHeight, P.camNear, P.camFar);
+
+scene.add(new THREE.HemisphereLight(0xfffaf0, 0xc2cfbf, 1.05));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.radius = 4;
+sun.shadow.bias = -0.0004;
+Object.assign(sun.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 1, far: 30 });
+scene.add(sun, sun.target);
+
+// ---- seabed with moving caustics -------------------------------------------
+const time = { value: 0 };
+const groundGeo = new THREE.PlaneGeometry(120, 120, 200, 200);
+groundGeo.rotateX(-Math.PI / 2);
+{
+  const p = groundGeo.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), z = p.getZ(i);
+    p.setY(i, Math.sin(x * 0.5) * Math.cos(z * 0.4) * 0.03 + Math.sin(x * 2.3 + z * 1.7) * 0.01);
+  }
+  groundGeo.computeVertexNormals();
+}
+const groundMat = new THREE.MeshStandardMaterial({ color: 0xf3e3bd, roughness: 1 });
+groundMat.onBeforeCompile = (s) => {
+  s.uniforms.uTime = time;
+  s.vertexShader = s.vertexShader
+    .replace('#include <common>', '#include <common>\nvarying vec3 vWP;')
+    .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvWP = (modelMatrix * vec4(transformed,1.0)).xyz;');
+  s.fragmentShader = s.fragmentShader
+    .replace('#include <common>', `#include <common>
+      varying vec3 vWP; uniform float uTime;
+      float caustic(vec2 p){
+        float c = 0.0;
+        for(int i=0;i<3;i++){
+          float fi = float(i);
+          vec2 q = p*(1.0+fi*0.6) + vec2(uTime*0.25*(1.0+fi*0.3), -uTime*0.2);
+          c += abs(sin(q.x+sin(q.y*1.3+uTime*0.7)) * sin(q.y+sin(q.x*1.1-uTime*0.5)));
+        }
+        return pow(1.0 - c/3.0, 6.0);
+      }`)
+    .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+      totalEmissiveRadiance += vec3(1.0,0.97,0.85) * caustic(vWP.xz*2.0) * 0.42;`);
+};
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.receiveShadow = true;
+scene.add(ground);
+
+const rand = (a, b) => a + Math.random() * (b - a);
+const rockMat = new THREE.MeshStandardMaterial({ color: 0xc4b598, roughness: 0.95, flatShading: true });
+// Obstacles the fish has to deal with: { x, z, r (horizontal radius), top (height) }.
+// Low rocks are climbed over; anything taller than P.maxClimb blocks the fish.
+const OBST = [];
+// Real shape of a rock object (a mesh, or a group of meshes for a pillar), measured from
+// its transformed vertices. The random x/y rotation tilts the squashed dodecahedron, so
+// the visible top can be far above r·0.25 + r·scale.y and must not be guessed.
+//   r     — widest horizontal reach of the rock from (x, z)  (used for the solid walls)
+//   top   — highest point
+//   parts — one ellipsoid per dodecahedron (its vertices lie on that ellipsoid, the flat
+//           faces inside it), for the exact "how high is the rock under this point" test
+function rockObst(obj, x, z) {
+  obj.updateMatrixWorld(true);
+  const o = { x, z, r: 0, top: 0, parts: [] }, v = new THREE.Vector3();
+  obj.traverse((m) => {
+    if (!m.isMesh) return;
+    const p = m.geometry.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      v.fromBufferAttribute(p, i).applyMatrix4(m.matrixWorld);
+      o.top = Math.max(o.top, v.y);
+      o.r = Math.max(o.r, Math.hypot(v.x - x, v.z - z));
+    }
+    const A = new THREE.Matrix3().setFromMatrix4(m.matrixWorld).invert().elements;
+    const c = new THREE.Vector3().setFromMatrixPosition(m.matrixWorld);
+    o.parts.push({ cx: c.x, cy: c.y, cz: c.z, A, ww: A[3] * A[3] + A[4] * A[4] + A[5] * A[5], r: m.geometry.parameters.radius });
+  });
+  return o;
+}
+const clearOfSpawn = (x, z, r) => Math.hypot(x, z) > r + 0.8;
+for (let i = 0; i < 90; i++) {
+  const r = rand(0.1, 0.5);
+  const x = rand(-25, 25), z = rand(-25, 25);
+  if (!clearOfSpawn(x, z, r)) continue;
+  const m = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 1), rockMat);
+  m.position.set(x, r * 0.25, z);
+  m.scale.y = rand(0.45, 0.8);
+  m.rotation.set(rand(0, 3), rand(0, 3), 0);
+  m.castShadow = m.receiveShadow = true;
+  scene.add(m);
+  OBST.push(rockObst(m, x, z));
+}
+// Test layout (extra rocks near the start + tall rock pillars). Off by default = the
+// original open map; the "rock pillars" toggle in Tuning brings them back.
+const baseObst = OBST.slice(), extraObst = [], extraObjs = [];
+// a few close to the start so both cases are easy to try
+const extraRocks = [[1.2, 1.6, 0.32, 0.6], [-1.4, 2.4, 0.4, 0.55], [0.6, -1.8, 0.26, 0.7], [2.6, -0.4, 0.38, 0.5]];
+for (const [x, z, r, sy] of extraRocks) {
+  const m = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 1), rockMat);
+  m.position.set(x, r * 0.25, z); m.scale.y = sy; m.rotation.set(rand(0, 3), rand(0, 3), 0);
+  m.castShadow = m.receiveShadow = true; scene.add(m); extraObjs.push(m);
+  extraObst.push(rockObst(m, x, z));
+}
+// tall rock pillars: too high to swim over → the fish bumps into them or slides around
+const pillarMat = new THREE.MeshStandardMaterial({ color: 0xb3a487, roughness: 0.95, flatShading: true });
+const pillars = [[-2.2, -0.8, 0.45, 1.4], [2.0, 3.2, 0.55, 1.8], [-0.4, 4.4, 0.35, 1.1]];
+for (let i = 0; i < 26; i++) pillars.push([rand(-24, 24), rand(-24, 24), rand(0.3, 0.7), rand(0.9, 2.0)]);
+for (const [x, z, r, h] of pillars) {
+  if (!clearOfSpawn(x, z, r)) continue;
+  const g = new THREE.Group();
+  const n = 3 + (Math.random() * 2 | 0);
+  for (let k = 0; k < n; k++) {
+    const rr = r * (1 - k * 0.12);
+    const m = new THREE.Mesh(new THREE.DodecahedronGeometry(rr, 1), pillarMat);
+    m.position.set(rand(-0.04, 0.04), h * (k + 0.5) / n, rand(-0.04, 0.04));
+    m.scale.set(1, (h / n) / rr * 0.62, 1);
+    m.rotation.set(rand(0, 0.3), rand(0, 3), rand(0, 0.3));
+    m.castShadow = m.receiveShadow = true;
+    g.add(m);
+  }
+  g.position.set(x, 0, z);
+  scene.add(g); extraObjs.push(g);
+  extraObst.push(rockObst(g, x, z));
+}
+function applyMap() {
+  OBST.length = 0; OBST.push(...baseObst);
+  if (P.pillars) OBST.push(...extraObst);
+  for (const o of extraObjs) o.visible = P.pillars;
+}
+applyMap();
+const weedMat = new THREE.MeshStandardMaterial({ color: 0x67ad74, side: THREE.DoubleSide, roughness: 0.8 });
+weedMat.onBeforeCompile = (s) => {
+  s.uniforms.uTime = time;
+  s.vertexShader = s.vertexShader
+    .replace('#include <common>', '#include <common>\nuniform float uTime;')
+    .replace('#include <begin_vertex>', `#include <begin_vertex>
+      vec4 wp0 = modelMatrix * vec4(0.,0.,0.,1.);
+      float k = position.y * position.y * 0.45;
+      transformed.x += sin(uTime*1.3 + wp0.x*0.4 + position.y*1.2) * k;
+      transformed.z += cos(uTime*1.1 + wp0.z*0.4 + position.y) * k * 0.6;`);
+};
+for (let i = 0; i < 160; i++) {
+  const h = rand(0.3, 0.9);
+  const geo = new THREE.PlaneGeometry(0.06, h, 1, 8);
+  geo.translate(0, h / 2, 0);
+  const m = new THREE.Mesh(geo, weedMat);
+  m.position.set(rand(-25, 25), 0, rand(-25, 25));
+  m.rotation.y = rand(0, Math.PI);
+  m.castShadow = true;
+  scene.add(m);
+}
+{
+  const peb = new THREE.InstancedMesh(new THREE.SphereGeometry(0.03, 8, 6), new THREE.MeshStandardMaterial({ color: 0xfff6e2, roughness: 0.6 }), 500);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), sc = new THREE.Vector3();
+  for (let i = 0; i < 500; i++) { const k = rand(0.5, 1.6); peb.setMatrixAt(i, m4.compose(v.set(rand(-25, 25), 0.008, rand(-25, 25)), q, sc.set(k, k * 0.45, k))); }
+  peb.receiveShadow = true;
+  scene.add(peb);
+}
+
+// =============================================================================
+// Fish model (original design). Every vertex stores `along` (0 nose → 1 tail
+// tip); the vertex shader places it on a spine computed each frame on the CPU.
+// =============================================================================
+const deg = THREE.MathUtils.degToRad;
+const clamp01 = (x) => Math.min(1, Math.max(0, x));
+const smooth = (e0, e1, x) => { const k = clamp01((x - e0) / (e1 - e0)); return k * k * (3 - 2 * k); };
+
+const L = P.fishLength;          // nose → tail-fin tip (m)
+const K = 32;                    // spine samples
+const T_BODY = 0.76;             // body ends, tail fin begins
+// Skeleton of the hero model: Spine_0 (head) … Spine_6, 0.0732 apart, nose→tip = 0.61   [APK]
+// → bone positions along the body 0.28, 0.40 … 1.00. TailFin hinge hangs off Spine_4.
+// The fish's sim position (turn pivot) sits at Spine_0: Model offset 0.1255 + PivotShift −0.149.
+const T_PIVOT = 0.28;
+const BONES = [0.28, 0.40, 0.52, 0.64, 0.76, 0.88, 1.0];
+let T_HINGE = 0.78;   // overwritten from P.tailHinge each frame
+
+const SH = { h: 0.27 * L, w: 0.2 * L, peak: 0.38, ped: 0.32, belly: 1.08 };
+function envelope(t) {
+  const u = Math.min(t, T_BODY) / T_BODY;
+  if (u < SH.peak) { const k = 1 - u / SH.peak; return Math.pow(Math.max(0, 1 - Math.pow(k, 2.4)), 0.5); }
+  const k = (u - SH.peak) / (1 - SH.peak);
+  return SH.ped + (1 - SH.ped) * (0.5 + 0.5 * Math.cos(Math.PI * Math.pow(k, 0.85)));
+}
+
+const PAL = {
+  top: 0xff8c1a, side: 0xffb431, belly: 0xfff1cf, cheek: 0xffd27a,
+  fin: 0xff7a3d, finEdge: 0xffd9a0, iris: 0x2b1d14,
+};
+
+function buildBody() {
+  const NS = 64, NR = 32;
+  const pos = [], col = [], along = [], idx = [];
+  const cTop = new THREE.Color(PAL.top), cSide = new THREE.Color(PAL.side), cBelly = new THREE.Color(PAL.belly), cCheek = new THREE.Color(PAL.cheek);
+  const c = new THREE.Color();
+  for (let i = 0; i <= NS; i++) {
+    const t = (i / NS) * T_BODY, e = envelope(t), u = t / T_BODY;
+    const H = SH.h * e, W = SH.w * e * (1 - 0.18 * u);
+    for (let j = 0; j <= NR; j++) {
+      const a = (j / NR) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
+      pos.push(Math.sign(ca) * Math.pow(Math.abs(ca), 0.85) * W,
+               Math.sign(sa) * Math.pow(Math.abs(sa), 0.9) * H * (sa < 0 ? SH.belly : 1), 0);
+      along.push(t);
+      if (sa > 0) c.copy(cSide).lerp(cTop, Math.pow(sa, 1.3)); else c.copy(cSide).lerp(cBelly, Math.pow(-sa, 0.6));
+      // soft cheek patch and darker back towards the tail
+      const cheek = (1 - smooth(0.05, 0.12, Math.abs(u - 0.22))) * (1 - smooth(0.0, 0.5, Math.abs(sa + 0.05)));
+      c.lerp(cCheek, cheek * 0.6);
+      c.multiplyScalar(1 - 0.12 * smooth(0.5, 1, u) * Math.max(0, sa));
+      col.push(c.r, c.g, c.b);
+    }
+  }
+  for (let i = 0; i < NS; i++) for (let j = 0; j < NR; j++) {
+    const a = i * (NR + 1) + j, b = a + NR + 1;
+    idx.push(a, b, a + 1, a + 1, b, b + 1);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setAttribute('along', new THREE.Float32BufferAttribute(along, 1));
+  g.setAttribute('flex', new THREE.Float32BufferAttribute(new Float32Array(along.length), 1));
+  g.setIndex(idx);
+  // normals from a straight copy (z comes from the spine at runtime)
+  const tmp = g.clone();
+  for (let i = 0; i < along.length; i++) tmp.attributes.position.setZ(i, -along[i] * L);
+  tmp.computeVertexNormals();
+  g.setAttribute('normal', tmp.attributes.normal);
+  return g;
+}
+
+function grid(nu, nv, fn) {
+  const pos = [], uv = [], along = [], flex = [], idx = [];
+  for (let i = 0; i <= nu; i++) for (let j = 0; j <= nv; j++) {
+    const r = fn(i / nu, j / nv);
+    pos.push(r.x, r.y, 0); along.push(r.t); flex.push(r.flex); uv.push(i / nu, j / nv);
+  }
+  for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) {
+    const a = i * (nv + 1) + j, b = a + nv + 1;
+    idx.push(a, b, a + 1, a + 1, b, b + 1);
+  }
+  return { pos, uv, along, flex, idx };
+}
+function mergeGrids(parts) {
+  const out = { pos: [], uv: [], along: [], flex: [], idx: [] };
+  let base = 0;
+  for (const p of parts) {
+    out.pos.push(...p.pos); out.uv.push(...p.uv); out.along.push(...p.along); out.flex.push(...p.flex);
+    for (const i of p.idx) out.idx.push(i + base);
+    base += p.pos.length / 3;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(out.pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(out.uv, 2));
+  g.setAttribute('along', new THREE.Float32BufferAttribute(out.along, 1));
+  g.setAttribute('flex', new THREE.Float32BufferAttribute(out.flex, 1));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(out.pos.map((_, i) => (i % 3 === 0 ? 1 : 0)), 3));
+  g.setIndex(out.idx);
+  return g;
+}
+function buildFins() {
+  const topY = (t) => SH.h * envelope(t);
+  // tail fin: broad rounded fan with a gentle notch
+  const tRoot = T_BODY - 0.05;
+  const TAIL_SIZE = 0.9;   // tail fin size (1 = previous size; user asked for 10% smaller)
+  const tail = grid(16, 14, (u, v) => {
+    const vv = v * 2 - 1, av = Math.abs(vv);
+    const lenF = (1 - 0.14 * Math.pow(1 - av, 2) - 0.1 * av * av) * TAIL_SIZE;
+    // slight cup: the fin's mid-line bows sideways a little so it reads from above
+    const cup = 0.035 * L * TAIL_SIZE * Math.pow(u, 1.5) * (1 - vv * vv);
+    return { x: cup, y: vv * THREE.MathUtils.lerp(SH.h * SH.ped * 0.95, 0.4 * L * TAIL_SIZE, Math.pow(u, 0.6)), t: tRoot + u * lenF * (1 - tRoot), flex: u };
+  });
+  // dorsal fin: soft arc
+  const dorsal = grid(12, 5, (u, v) => {
+    const t = 0.24 + u * 0.36;
+    const h = 0.13 * L * Math.pow(Math.sin(Math.PI * Math.min(1, u * 1.05)), 0.7) * (1 - 0.3 * u);
+    return { x: 0, y: topY(t) * 0.9 + v * h, t: t + v * 0.05, flex: v * 0.7 };
+  });
+  // anal fin
+  const anal = grid(8, 4, (u, v) => {
+    const t = 0.5 + u * 0.16;
+    const h = 0.07 * L * Math.pow(Math.sin(Math.PI * u), 0.7);
+    return { x: 0, y: -topY(t) * SH.belly * 0.9 - v * h, t: t + v * 0.03, flex: v * 0.7 };
+  });
+  return mergeGrids([tail, dorsal, anal]);
+}
+
+const finTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d');
+  // mostly opaque fin that warms to a deeper red-orange towards the edge, so the
+  // fin reads clearly against the sand even when the fish is small on screen
+  const grd = g.createLinearGradient(0, 0, 256, 0);
+  grd.addColorStop(0, 'rgb(255,255,255)'); grd.addColorStop(0.55, 'rgb(255,236,214)');
+  grd.addColorStop(0.8, 'rgb(236,150,110)'); grd.addColorStop(1, 'rgb(200,90,60)');
+  g.fillStyle = grd; g.fillRect(0, 0, 256, 256);
+  g.strokeStyle = 'rgba(255,255,255,0.45)'; g.lineWidth = 2.5;
+  for (let y = 8; y < 256; y += 20) { g.beginPath(); g.moveTo(0, 128 + (y - 128) * 0.3); g.lineTo(200, 128 + (y - 128) * 0.85); g.stroke(); }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+
+// ---- spine deformation shader ------------------------------------------------
+const uni = { uSpine: { value: Array.from({ length: K + 1 }, (_, i) => new THREE.Vector3(0, -i / K * L, 0)) }, uPhase: { value: 0 }, uFlutter: { value: 0.006 } };
+const SPINE_GLSL = `
+  attribute float along;
+  attribute float flex;
+  uniform vec3 uSpine[${K + 1}];
+  uniform float uPhase, uFlutter;
+  vec3 spineAt(float t){
+    float s = clamp(t, 0.0, 1.0) * ${K}.0;
+    int i = int(min(floor(s), ${K - 1}.0));
+    return mix(uSpine[i], uSpine[i + 1], s - float(i));
+  }`;
+function spineMat(mat, rim) {
+  mat.onBeforeCompile = (s) => {
+    Object.assign(s.uniforms, uni);
+    s.vertexShader = s.vertexShader
+      .replace('#include <common>', '#include <common>\n' + SPINE_GLSL)
+      .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
+        { vec3 sp = spineAt(along); float c = cos(sp.z), sn = sin(sp.z);
+          objectNormal = vec3(objectNormal.x*c - objectNormal.z*sn, objectNormal.y, objectNormal.x*sn + objectNormal.z*c); }`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        { vec3 sp = spineAt(along); float c = cos(sp.z), sn = sin(sp.z);
+          float ox = position.x + flex * sin(uPhase * 1.5 - along * 10.0 + position.y * 40.0) * uFlutter;
+          transformed = vec3(sp.x + ox*c, position.y, sp.y + ox*sn); }`);
+    if (rim) s.fragmentShader = s.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+        { float r = 1.0 - clamp(dot(-normalize(vViewPosition), normal), 0.0, 1.0);
+          totalEmissiveRadiance += vec3(1.0,0.96,0.88) * pow(r, 3.0) * 0.12; }`);
+  };
+  mat.customProgramCacheKey = () => 'spine' + (rim ? 'r' : '');
+  return mat;
+}
+
+// ---- assemble ------------------------------------------------------------------
+const fish = new THREE.Group();     // position + yaw
+const tilt = new THREE.Group();     // pitch + bank + head yaw
+tilt.rotation.order = 'YXZ';
+fish.add(tilt);
+scene.add(fish);
+
+const body = new THREE.Mesh(buildBody(), spineMat(new THREE.MeshPhysicalMaterial({
+  vertexColors: true, roughness: 0.45, clearcoat: 0.35, clearcoatRoughness: 0.35, envMap: envTex, envMapIntensity: 0.08,
+}), true));
+const fins = new THREE.Mesh(buildFins(), spineMat(new THREE.MeshStandardMaterial({
+  color: PAL.fin, emissive: PAL.fin, emissiveIntensity: 0.25, map: finTex, emissiveMap: finTex, opacity: 0.97,
+  transparent: true, side: THREE.DoubleSide, roughness: 0.5, depthWrite: false,
+}), false));
+for (const m of [body, fins]) {
+  m.castShadow = true; m.frustumCulled = false;
+  m.customDepthMaterial = spineMat(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }), false);
+}
+fins.renderOrder = 1;
+tilt.add(body, fins);
+
+// eyes with lids (FishEyelids → occasional blink)
+const eyeWhite = new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.15, clearcoat: 1, envMap: envTex, envMapIntensity: 0.4 });
+const eyes = [];
+for (const sx of [-1, 1]) {
+  const r = 0.085 * L;
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(new THREE.SphereGeometry(r, 24, 16), eyeWhite));
+  const iris = new THREE.Mesh(new THREE.SphereGeometry(r * 0.64, 20, 14), new THREE.MeshStandardMaterial({ color: PAL.iris, roughness: 0.25 }));
+  iris.scale.z = 0.5; iris.position.z = r * 0.72;
+  const g1 = new THREE.Mesh(new THREE.SphereGeometry(r * 0.2, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  g1.position.set(r * 0.22, r * 0.28, r * 0.98);
+  const g2 = new THREE.Mesh(new THREE.SphereGeometry(r * 0.09, 8, 6), g1.material);
+  g2.position.set(-r * 0.2, -r * 0.18, r * 1.0);
+  const lid = new THREE.Mesh(new THREE.SphereGeometry(r * 1.06, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshStandardMaterial({ color: PAL.top, roughness: 0.5 }));
+  lid.rotation.x = -Math.PI / 2;  // dome faces forward; scaled to close
+  lid.scale.y = 0.001;
+  g.add(iris, g1, g2, lid);
+  g.userData = { sx, t: 0.13, y: SH.h * 0.3, lid };
+  tilt.add(g); eyes.push(g);
+}
+// mouth (FishJaw → small idle open/close)
+const mouth = new THREE.Mesh(new THREE.SphereGeometry(0.022 * L / 0.5, 14, 8), new THREE.MeshStandardMaterial({ color: 0x6b2410, roughness: 0.6 }));
+mouth.scale.set(1.6, 0.35, 0.5);
+tilt.add(mouth);
+// pectoral fins
+const pecGeo = (() => {
+  const g = grid(6, 4, (u, v) => ({ x: u * 0.27 * L * (1 - 0.35 * Math.pow(Math.abs(v * 2 - 1), 2)), y: (v - 0.5) * 0.2 * L * (0.45 + u * 0.75), t: 0, flex: 0 }));
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(g.pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(g.uv, 2));
+  geo.setIndex(g.idx); geo.computeVertexNormals();
+  return geo;
+})();
+const pecMat = new THREE.MeshStandardMaterial({ color: PAL.fin, emissive: PAL.fin, emissiveIntensity: 0.35, map: finTex, emissiveMap: finTex, transparent: true, side: THREE.DoubleSide, depthWrite: false });
+const pecs = [];
+for (const sx of [-1, 1]) {
+  const pivot = new THREE.Group();
+  const m = new THREE.Mesh(pecGeo, pecMat); m.scale.x = sx; m.castShadow = true;
+  pivot.add(m); pivot.userData = { sx, t: 0.3, y: -SH.h * 0.3 };
+  tilt.add(pivot); pecs.push(pivot);
+}
+
+// =============================================================================
+// Animation state & the decompiled behaviours
+// =============================================================================
+const S = {
+  pos: new THREE.Vector3(0, 0, 0), vel: new THREE.Vector3(),
+  heading: 0, rate: 0, yawRate: 0, animSpeed: 0, animSpeedVel: 0,
+  // FishTailSway
+  drive: 0, scale: P.atRest, phase: 0,
+  // FishSwimMotion
+  swim: 0, wagPhase: 0, idlePhase: 0, bank: 0, bankVel: 0,
+  rise: 0, riseState: 'wait', riseTimer: rand(3, 8), riseFrom: 0, riseTo: 0, riseT: 0, riseHold: 1, prevRise: 0, pitch: 0,
+  blink: rand(1.4, 3.2), blinkT: 0, jaw: 0,
+  finS: 0, finV: 0, fold: 0, pecTurn: 0, pecTurnVel: 0, flutter: 0, curlRate: 0, inX: 0, inZ: 0,
+  swimY: 0.19, swimYVel: 0, avoid: 0, bumped: 0,
+  chainA: new Float32Array(8), chainV: new Float32Array(8),
+  // dash: time left, direction, 0..1 strength (speed), mouth open, charges, refill timer, input buffer
+  dashT: 0, dashDir: 0, dashAmt: 0, dashOpen: 0, charges: 3, regen: 0, dashBuf: 0,
+};
+
+// ---- soft body chain (procedural turn curl) ----------------------------------
+// CHAIN_N segments behind the head. Segment 0 follows the head's heading, every
+// next segment follows the one in front with an angular spring-damper; the
+// spring gets looser towards the tail, so a quick turn ripples down the body,
+// overshoots a little and settles — the "soft" feel.
+// ---- obstacles ----------------------------------------------------------------
+// Soft "lift early" envelope used only as a swim-height *target* (for a smooth climb):
+// rock top + belly depth + clearance, fading out smoothly past the rock's edge.
+function climbHeightAt(x, z) {
+  let h = 0;
+  for (const o of OBST) {
+    if (o.top > P.maxClimb) continue;
+    const d = Math.hypot(x - o.x, z - o.z), reach = o.r + P.fishRadius + 0.08;
+    if (d >= reach) continue;
+    const w = 1 - smooth(o.r * 0.55, reach, d);          // dome-shaped profile
+    h = Math.max(h, (o.top + P.fishBelly + P.climbClear) * w);
+  }
+  return h;
+}
+// Highest point of one rock ellipsoid straight above/below (px, pz), or -Infinity if the
+// vertical line misses it. Solves |A·(q + y·ŷ)| = r for the larger y (A = inverse of the
+// rock's linear transform).
+function partTopAt(p, px, pz) {
+  const e = p.A, qx = px - p.cx, qz = pz - p.cz;
+  const ux = e[0] * qx + e[6] * qz, uy = e[1] * qx + e[7] * qz, uz = e[2] * qx + e[8] * qz;
+  const uw = ux * e[3] + uy * e[4] + uz * e[5], uu = ux * ux + uy * uy + uz * uz;
+  const disc = uw * uw - p.ww * (uu - p.r * p.r);
+  return disc < 0 ? -Infinity : p.cy + (-uw + Math.sqrt(disc)) / p.ww;
+}
+// Points under the fish's body, relative to the sim position (the turn pivot, T_PIVOT from
+// the nose): { f: metres forward, s: metres to the side, d: how far the belly hangs below
+// the centre there }. Built from the same envelope as the body mesh: belly depth falls off
+// towards the nose / tail stalk and towards the flanks (superellipse cross-section).
+let BODY_PTS = null;
+function bodyPts() {
+  if (BODY_PTS) return BODY_PTS;
+  BODY_PTS = [];
+  for (const t of [0.02, 0.08, 0.16, 0.28, 0.4, 0.52, 0.64, 0.74]) {
+    const e = envelope(t), W = SH.w * e * (1 - 0.18 * t / T_BODY), f = (T_PIVOT - t) * L;
+    for (const [side, depth] of [[0, 1], [0.6, 0.85], [-0.6, 0.85], [1, 0.45], [-1, 0.45]])
+      BODY_PTS.push({ f, s: side * W, d: e * depth });
+  }
+  return BODY_PTS;
+}
+// Hard floor: lowest centre height at which no part of the body (posed at (x, z) facing
+// `heading`) is inside a low rock. P.fishBelly = belly depth below the centre at its thickest.
+// withTilt: also allow for the current pitch / roll lowering the nose, tail or a flank. Only
+// for the hard clamp — pitch comes from the vertical speed, so feeding it into the smooth
+// target would make the swim height bounce.
+function bodyFloorAt(x, z, heading, withTilt = false) {
+  const fx = Math.sin(heading), fz = Math.cos(heading);
+  const pitchS = withTilt ? Math.sin(Math.abs(deg(S.pitch))) : 0, bankS = withTilt ? Math.sin(Math.abs(deg(S.bank))) : 0;
+  let h = 0;
+  for (const o of OBST) {
+    if (o.top > P.maxClimb) continue;
+    if (Math.hypot(x - o.x, z - o.z) > o.r + 0.45) continue;   // body reach ≈ 0.4
+    for (const b of bodyPts()) {
+      const px = x + fx * b.f + fz * b.s, pz = z + fz * b.f - fx * b.s;
+      const tip = Math.abs(b.f) * pitchS + Math.abs(b.s) * bankS;   // pitch / roll lower ends & flanks
+      for (const part of o.parts) {
+        const top = partTopAt(part, px, pz);
+        if (top > -Infinity) h = Math.max(h, top + b.d * P.fishBelly + tip + P.climbClear);
+      }
+    }
+  }
+  return h;
+}
+const CLIMB_MARGIN = 0.15;   // m: how far around the body the climb target looks
+const isWall = (o) => o.top > P.maxClimb;
+// Steering offset (radians) away from a tall obstacle that lies on the swim path.
+function avoidOffset(dir) {
+  const fx = Math.sin(dir), fz = Math.cos(dir);
+  let best = 0, bestScore = 0;
+  for (const o of OBST) {
+    if (!isWall(o)) continue;
+    const rx = o.x - S.pos.x, rz = o.z - S.pos.z;
+    const along = rx * fx + rz * fz;
+    if (along <= 0 || along > P.avoidLook + o.r) continue;
+    const lateral = rx * fz - rz * fx;                 // + = obstacle on the right
+    const clear = o.r + P.fishRadius + 0.08;
+    if (Math.abs(lateral) >= clear) continue;
+    // smoothstep weights: the steer fades in with distance and out towards the rock's edge
+    const score = smooth(0, 1, 1 - along / (P.avoidLook + o.r)) * smooth(0, 1, 1 - Math.abs(lateral) / clear);
+    // nearly head-on: keep turning the way we already are, so the side doesn't flip
+    let side = lateral >= 0 ? -1 : 1;
+    if (Math.abs(lateral) < 0.25 * clear && Math.abs(S.avoid) > 1e-3) side = Math.sign(S.avoid);
+    if (score > bestScore) { bestScore = score; best = side * deg(P.avoidSteer) * score; }
+  }
+  return best;
+}
+// Tall obstacles are solid: push the fish out and cancel the velocity into them, so it
+// bumps and slides along the side instead of passing through.
+// The body is a capsule along the heading (nose T_PIVOT·L ahead of the pivot, body end
+// (T_BODY − T_PIVOT)·L behind it, radius fishRadius), not a circle around the pivot —
+// otherwise the nose pokes into the rock while the fish faces/presses into it and the
+// tail swings in when it turns away. Several passes so two rocks close together can't
+// push the fish into each other. Must also run after the heading changes.
+function resolveCollisions() {
+  const R = P.fishRadius, fx = Math.sin(S.heading), fz = Math.cos(S.heading);
+  const a = Math.max(0, T_PIVOT * L - R), b = Math.max(0, (T_BODY - T_PIVOT) * L - R);
+  for (let pass = 0; pass < 4; pass++) {
+    let hit = false;
+    for (const o of OBST) {
+      if (!isWall(o)) continue;
+      const k = THREE.MathUtils.clamp((o.x - S.pos.x) * fx + (o.z - S.pos.z) * fz, -b, a);
+      let dx = S.pos.x + fx * k - o.x, dz = S.pos.z + fz * k - o.z, d = Math.hypot(dx, dz);
+      const minD = o.r + R;
+      if (d >= minD) continue;
+      if (d < 1e-6) { dx = -fx; dz = -fz; d = 1e-6; }       // dead centre: back straight out
+      const nx = dx / Math.hypot(dx, dz), nz = dz / Math.hypot(dx, dz), push = minD - d;
+      S.pos.x += nx * push; S.pos.z += nz * push;
+      const vn = S.vel.x * nx + S.vel.z * nz;
+      if (vn < 0) { S.vel.x -= vn * nx; S.vel.z -= vn * nz; S.bumped = 1; }
+      hit = true;
+    }
+    if (!hit) break;
+  }
+}
+
+const CHAIN_N = 8;
+function stepChain(dt) {
+  const steps = Math.max(1, Math.ceil(dt / (1 / 240))), h = dt / steps;
+  for (let s = 0; s < steps; s++) {
+    for (let j = 0; j < CHAIN_N; j++) {
+      const u = j / (CHAIN_N - 1);
+      const w = 2 * Math.PI * P.curlHz * (1 - P.curlLoose * u);
+      const z = P.curlDamp;
+      const target = j === 0 ? S.heading : S.chainA[j - 1];
+      const diff = wrapPi(target - S.chainA[j]);
+      const acc = w * w * diff - 2 * z * w * S.chainV[j];
+      S.chainV[j] += acc * h;
+      S.chainA[j] = wrapPi(S.chainA[j] + S.chainV[j] * h);
+    }
+  }
+}
+
+// ---- HeadingSmoother.Step (decompiled) -------------------------------------
+// dt clamped to 0.1 and split into ≤1/120 s substeps. Each substep:
+//   want  = clamp(ShortestWay(target − angle) / TurnSmoothTime, ±MaxTurnRate)
+//   rate += (want − rate) · (1 − exp(−h / (TurnSmoothTime · 0.25)))
+//   angle = Wrap(angle + rate · h)
+// ShortestWay keeps turning the current way when the target is ~180° behind.
+const TWO_PI = Math.PI * 2;
+const wrapPi = (a) => { a = ((a + Math.PI) % TWO_PI + TWO_PI) % TWO_PI - Math.PI; return a; };
+function shortestWay(delta) {
+  let d = wrapPi(delta);
+  if (d === 0 || S.rate === 0) return d;
+  if (Math.sign(d) === Math.sign(S.rate)) return d;
+  const alt = d + Math.sign(S.rate) * TWO_PI;       // the long way, same direction as current rate
+  // hysteresis: keep spinning the current way unless the short way wins by more than 2·|rate|·τ
+  return Math.abs(alt) < Math.abs(d) + 2 * Math.abs(S.rate) * Math.max(P.turnSmooth, 1e-3) ? alt : d;
+}
+function headingStep(target, dt) {
+  dt = Math.min(Math.max(dt, 0), 0.1);
+  if (dt <= 0) return;
+  const tau = Math.max(P.turnSmooth, 1e-3), maxRate = Math.max(deg(P.turnRate), 0.01);
+  const n = Math.max(1, Math.ceil(dt / (1 / 120))), h = dt / n;
+  const k = 1 - Math.exp(-h / (tau * 0.25));
+  for (let i = 0; i < n; i++) {
+    const want = THREE.MathUtils.clamp(shortestWay(target - S.heading) / tau, -maxRate, maxRate);
+    S.rate += (want - S.rate) * k;
+    S.heading = wrapPi(S.heading + S.rate * h);
+  }
+}
+
+// Unity SmoothDamp (used by TickBank)
+function smoothDamp(cur, target, velRef, smoothTime, dt) {
+  smoothTime = Math.max(0.0001, smoothTime);
+  const omega = 2 / smoothTime, x = omega * dt, e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+  const change = cur - target, temp = (velRef.v + omega * change) * dt;
+  velRef.v = (velRef.v - omega * temp) * e;
+  return target + (change + temp) * e;
+}
+const bankVel = { v: 0 };
+
+// ---- FishTailSway.LateUpdate (decompiled) ------------------------------------
+// n = spine bones (Spine_1…Spine_6). Every bone gets an ABSOLUTE yaw; its local
+// rotation is the difference to the previous bone, so nothing accumulates:
+//   head (Spine_0):  H   = HeadDegrees · sin(phase + Lag·(n+1)) · Scale
+//   Spine_k (1…n):   A_k = BodyDegrees · (k/n) · sin(phase + Lag·(n+1−k)) · Scale
+//   TailFin hinge:   F   = Degrees · sin(phase) · Scale   (local, on Spine_4)
+// The lag index counts down towards the tail, so the wave runs head → tail.
+const boneAng = new Float32Array(BONES.length);
+// Catmull-Rom through (x_i, y_i) — smooth like skinned vertices blending across bones
+function catmull(xs, ys, t) {
+  const n = xs.length;
+  if (t <= xs[0]) return ys[0];
+  if (t >= xs[n - 1]) return ys[n - 1];
+  let i = 0;
+  while (i < n - 2 && t > xs[i + 1]) i++;
+  const p0 = ys[Math.max(0, i - 1)], p1 = ys[i], p2 = ys[i + 1], p3 = ys[Math.min(n - 1, i + 2)];
+  const u = (t - xs[i]) / (xs[i + 1] - xs[i]), u2 = u * u, u3 = u2 * u;
+  return 0.5 * (2 * p1 + (-p0 + p2) * u + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u2 + (-p0 + 3 * p1 - 3 * p2 + p3) * u3);
+}
+const ctrlX = [], ctrlY = [];
+function solveSpine(dt) {
+  T_HINGE = P.tailHinge;
+  const n = BONES.length - 1, lag = deg(P.lagDegrees);
+  boneAng[0] = deg(P.headDegrees) * Math.sin(S.phase + lag * (n + 1)) * S.scale;
+  for (let k = 1; k <= n; k++) boneAng[k] = deg(P.bodyDegrees) * (k / n) * Math.sin(S.phase + lag * (n + 1 - k)) * S.scale;
+  // tail-fin hinge angle; in natural mode it continues the body wave's phase
+  const finShift = P.motion === 'natural' ? -TWO_PI / Math.max(P.natWave, 0.2) * (T_HINGE - T_PIVOT) - 0.5 : 0;
+  const fin = deg(P.tailDegrees) * Math.sin(S.phase + finShift) * S.scale;
+
+  // fin follow-through: the soft fin tip trails the hinge on an underdamped spring
+  const w0 = 2 * Math.PI * P.finSpringHz, z0 = P.finSpringDamp;
+  const steps = Math.max(1, Math.ceil(dt / (1 / 240))), h = dt / steps;
+  for (let i = 0; i < steps; i++) {
+    const acc = w0 * w0 * (fin - S.finS) - 2 * z0 * w0 * S.finV;
+    S.finV += acc * h; S.finS += S.finV * h;
+  }
+  const finLag = (S.finS - fin) * P.finFollow;      // how far the soft tip trails the hinge
+
+  // segment i (bone i → bone i+1) carries boneAng[i]; smooth curve through segment midpoints
+  ctrlX.length = ctrlY.length = 0;
+  for (let i = 0; i < n; i++) { ctrlX.push((BONES[i] + BONES[i + 1]) / 2); ctrlY.push(boneAng[i]); }
+  ctrlX.push(1.0); ctrlY.push(boneAng[n]);
+  // ---- spring-chain turn bend (shared): each segment trails the one in front of it
+  // (see stepChain). Sharp-turn boost: the further the tail trails the head (U-turns),
+  // the harder it folds; turns up to ~90° are almost unaffected.
+  const span = 1 - T_PIVOT;
+  const bendGain = P.motion === 'natural' ? P.natCurl : P.turnTailBend;
+  const tailLagDeg = Math.abs(wrapPi(S.heading - S.chainA[CHAIN_N - 1])) * 180 / Math.PI;
+  const foldGain = bendGain * (1 + P.curlBigTurn * smooth(70, 170, tailLagDeg));
+  const curlAt = (t) => {
+    if (bendGain <= 0) return 0;
+    const u = clamp01((t - T_PIVOT) / span) * CHAIN_N;
+    const i = Math.min(CHAIN_N - 1, Math.floor(u)), f = u - i;
+    const a0 = i === 0 ? 0 : wrapPi(S.heading - S.chainA[i - 1]);
+    const a1 = wrapPi(S.heading - S.chainA[i]);
+    const lim = deg(P.curlMaxFold);
+    return THREE.MathUtils.clamp(THREE.MathUtils.lerp(a0, a1, f) * foldGain, -lim, lim);
+  };
+
+  // ---- natural mode: travelling wave (head→tail), recoil, path-following curl
+  let natural = null;
+  if (P.motion === 'natural') {
+    const kWave = TWO_PI / Math.max(P.natWave, 0.2);
+    const recoil = -deg(P.natRecoil) * Math.sin(S.phase + 0.5) * S.scale;
+    natural = (t) => {
+      const u = clamp01((t - T_PIVOT) / span);
+      const env = deg(P.natHead) + (deg(P.natTail) - deg(P.natHead)) * Math.pow(u, 1.6);
+      return recoil + env * Math.sin(S.phase - kWave * Math.max(0, t - T_PIVOT)) * S.scale + curlAt(t);
+    };
+    boneAng[0] = natural(T_PIVOT);
+  }
+  const angleAt = (t) => {
+    if (natural) {
+      const hinge = smooth(T_HINGE - 0.03, T_HINGE + 0.03, t);
+      const tip = Math.pow(smooth(T_HINGE, 1.0, t), 1.5);
+      return natural(Math.min(t, T_HINGE + 0.02)) + fin * hinge + finLag * tip;
+    }
+    const th = catmull(ctrlX, ctrlY, t);
+    // TailFin hinge (child of Spine_4): the whole fin swings by the hinge angle, as in
+    // the game (weights reach 1 right after the hinge). The follow-through lag is added
+    // on top and grows towards the tip, so the fin curls without losing amplitude.
+    // the tail section (stalk + fin) swings around the hinge with a soft, skin-like joint
+    const hinge = smooth(T_HINGE - P.tailJointSoft, T_HINGE + P.tailJointSoft, t);
+    const tip = Math.pow(smooth(T_HINGE, 1.0, t), 1.5);
+    // turn bend (reference video): the front of the body stays rigid, the tail section
+    // trails behind the turn, folds and whips back
+    // The bend is spread along the whole tail stalk (from turnBendStart to just past the
+    // fin hinge) with a cosine ramp, so the stalk curves as an arc instead of kinking at
+    // the hinge; stalkCurve adds extra curvature in the middle of the stalk.
+    const ub = clamp01((t - P.turnBendStart) / Math.max(T_HINGE + 0.12 - P.turnBendStart, 0.05));
+    const bendW = (0.5 - 0.5 * Math.cos(Math.PI * ub)) * (1 + P.stalkCurve * Math.sin(Math.PI * ub));
+    return th + fin * hinge + finLag * tip + curlAt(t) * bendW;
+  };
+
+  const seg = L / K;
+  // head: rigid, rotated by H about the pivot (Spine_0 = the fish's sim position)
+  for (let i = 0; i <= K; i++) {
+    const t = i / K;
+    if (t > T_PIVOT) break;
+    const d = (T_PIVOT - t) * L;
+    uni.uSpine.value[i].set(-Math.sin(boneAng[0]) * d, Math.cos(boneAng[0]) * d, boneAng[0]);
+  }
+  // body + tail from the pivot backwards
+  const i0 = Math.ceil(T_PIVOT * K);
+  let th = angleAt(i0 / K);
+  let d0 = (i0 / K - T_PIVOT) * L;
+  let x = Math.sin(th) * d0, z = -Math.cos(th) * d0;
+  for (let i = i0; i <= K; i++) {
+    th = angleAt(i / K);
+    uni.uSpine.value[i].set(x, z, th);
+    x += Math.sin(th) * seg;
+    z -= Math.cos(th) * seg;
+  }
+}
+function spineAt(t) {
+  const s = clamp01(t) * K, i = Math.min(Math.floor(s), K - 1), k = s - i;
+  const a = uni.uSpine.value[i], b = uni.uSpine.value[i + 1];
+  return { x: a.x + (b.x - a.x) * k, z: a.y + (b.y - a.y) * k, th: a.z + (b.z - a.z) * k };
+}
+function attachParts(t, dt) {
+  // blink every 2–6 s
+  S.blink -= dt;
+  if (S.blink <= 0) { S.blinkT = 0.16; S.blink = rand(1.4, 3.2); }   // FishEyelids interval [APK]
+  S.blinkT = Math.max(0, S.blinkT - dt);
+  const lidK = S.blinkT > 0 ? Math.sin((1 - S.blinkT / 0.16) * Math.PI) : 0;
+  for (const e of eyes) {
+    const d = e.userData, sp = spineAt(d.t), W = SH.w * envelope(d.t) * 0.86;
+    e.position.set(sp.x + d.sx * W * Math.cos(sp.th), d.y, sp.z + d.sx * W * Math.sin(sp.th));
+    e.rotation.set(0, -sp.th + d.sx * (Math.PI / 2 - 0.55), 0);
+    d.lid.scale.y = Math.max(0.001, lidK);
+  }
+  for (const p of pecs) {
+    const d = p.userData, sp = spineAt(d.t), W = SH.w * envelope(d.t) * 0.9;
+    p.position.set(sp.x + d.sx * W * Math.cos(sp.th), d.y, sp.z + d.sx * W * Math.sin(sp.th));
+    // FishFins.Pose: rest pose angled pecRest° back from straight out, swept further back by
+    // SweepDegrees·fold, plus a paddle stroke (right fin +90°). Positive yaw·sx = towards the
+    // tail. The stroke swings sideways ↔ back; on the return (forward) half the fin feathers
+    // edge-on (rotation about its own long axis) so it pushes water backwards only.
+    const ph = S.flutter + (d.sx > 0 ? Math.PI / 2 : 0);
+    const flutter = deg(P.pecFlutter) * Math.sin(ph);
+    const feather = deg(P.pecFeather) * smooth(0, 1, Math.max(0, -Math.cos(ph)));
+    const sweep = deg(P.pecSweep) * S.pecPose;
+    p.rotation.set(feather, -sp.th + d.sx * (deg(P.pecRest) + sweep + flutter * 4), d.sx * (-0.35 + flutter * 3), 'YZX');
+  }
+  // jaw: slow idle breathing
+  S.jaw += dt * 2.2;
+  const sp = spineAt(0);
+  mouth.position.set(sp.x, -SH.h * 0.18, sp.z - 0.004);
+  mouth.scale.y = 0.3 + 0.25 * (0.5 + 0.5 * Math.sin(S.jaw)) * (1 - 0.6 * S.swim) + 1.1 * S.dashOpen;
+}
+
+function step(input, dt, t) {
+  // ---- joystick value (FloatingJoystick: offset / Radius, no smoothing in the game)
+  const k = P.stickSmooth > 0 ? 1 - Math.exp(-dt / P.stickSmooth) : 1;
+  S.inX += (input.x - S.inX) * k;
+  S.inZ += (input.z - S.inZ) * k;
+  const rawMag = Math.min(1, Math.hypot(input.x, input.z));
+  const mag = Math.min(1, Math.max(Math.hypot(S.inX, S.inZ), rawMag));
+  let moving = rawMag > 0.001 || mag > 0.05;        // DeadZone 0 [APK]
+
+  // ---- swim direction follows the stick angle quickly (up to steerRate, eased over
+  // steerSmooth). The angle is only read once the knob is a little off-centre so
+  // tiny finger jitter near the middle doesn't spin the fish.
+  if (rawMag > P.steerMinStick) {
+    const want = Math.atan2(S.inX, S.inZ);
+    if (S.moveDir === undefined || P.steerInstant) S.moveDir = want;
+    else {
+      const diff = wrapPi(want - S.moveDir);
+      const maxStep = deg(P.steerRate) * dt;
+      S.moveDir = wrapPi(S.moveDir + THREE.MathUtils.clamp(diff * (1 - Math.exp(-dt / Math.max(P.steerSmooth, 1e-3))), -maxStep, maxStep));
+    }
+  }
+  // ---- Sim.TickPlayerMovement: velocity = stick · 1.65 m/s, eased over velSmooth
+  // speed magnitude is eased; the velocity always points along the swim direction,
+  // so the fish never cuts corners or slides sideways while turning
+  // ---- dash: refill charges, start a buffered dash, lock its direction
+  if (S.charges < P.dashCharges) {
+    S.regen += dt;
+    if (S.regen >= P.dashRegen) { S.regen -= P.dashRegen; S.charges++; }
+  } else { S.charges = P.dashCharges; S.regen = 0; }
+  S.dashBuf = Math.max(0, S.dashBuf - dt);
+  if (S.dashBuf > 0 && S.dashT <= 0 && S.charges >= 1) {
+    S.dashBuf = 0; S.charges--; S.dashT = P.dashTime;
+    // dash where the stick points; with no stick, straight ahead of the fish
+    S.dashDir = rawMag > P.steerMinStick && S.moveDir !== undefined ? S.moveDir : S.heading;
+    bubAcc += 8;                                      // burst of bubbles from the fins
+    S.dashStarted = true;                             // dash effects pick this up
+  }
+  const dashing = S.dashT > 0;
+  if (dashing) {
+    moving = true;
+    // the stick can bend the dash: turn towards it at up to dashSteer °/s
+    if (rawMag > P.steerMinStick && S.moveDir !== undefined) {
+      const lim = deg(P.dashSteer) * dt;
+      S.dashDir = wrapPi(S.dashDir + THREE.MathUtils.clamp(wrapPi(S.moveDir - S.dashDir), -lim, lim));
+    }
+  }
+
+  const dir0 = dashing ? S.dashDir : (S.moveDir ?? S.heading);
+  // steer a little around tall obstacles straight ahead (they can't be swum over)
+  S.avoid += (avoidOffset(dir0) - S.avoid) * (1 - Math.exp(-dt / Math.max(P.avoidSmooth, 0.01)));
+  const dir = dir0 + S.avoid;
+  // speeding up stays instant (velSmooth); slowing down glides out over stopSmooth seconds
+  const tgtSpd = mag * P.speed, spdSm = tgtSpd < (S.spd ?? 0) ? P.stopSmooth : P.velSmooth;
+  S.spd = (S.spd ?? 0) + (tgtSpd - (S.spd ?? 0)) * (1 - Math.exp(-dt / Math.max(spdSm, 1e-3)));
+  S.vel.set(Math.sin(dir) * S.spd, 0, Math.cos(dir) * S.spd);
+  S.pos.addScaledVector(S.vel, dt);
+  resolveCollisions();
+  // dash burst: speed ∝ k·(1−k)² over dashTime — eases in, peaks at a third of the dash,
+  // then glides out to zero — and covers exactly dashDist body lengths (∫ = 1/12).
+  // Moved in small sub-steps so a fast dash can't tunnel through a rock pillar.
+  S.dashAmt = 0; S.dashOpen = 0;
+  if (dashing) {
+    const T = Math.max(P.dashTime, 0.05), D = P.dashDist * L;
+    const F = (k) => k * k / 2 - 2 * k * k * k / 3 + k ** 4 / 4;     // ∫ k(1−k)² dk
+    const k0 = 1 - S.dashT / T, k1 = Math.min(1, k0 + dt / T);
+    const dist = 12 * D * (F(k1) - F(k0));
+    const n = Math.max(1, Math.ceil(dist / 0.06));
+    const dx = Math.sin(dir) * dist / n, dz = Math.cos(dir) * dist / n;
+    for (let i = 0; i < n; i++) { S.pos.x += dx; S.pos.z += dz; resolveCollisions(); }
+    const shape = 6.75 * k1 * (1 - k1) ** 2;                         // 0..1, peak at k = 1/3
+    const v = 12 * D / T * k1 * (1 - k1) ** 2;
+    S.vel.x += Math.sin(dir) * v; S.vel.z += Math.cos(dir) * v;
+    S.dashAmt = shape;
+    S.dashOpen = smooth(0, 0.12, k1) * (1 - smooth(0.6, 1, k1));   // jaws open on the lunge
+    S.dashT -= dt;
+  }
+
+  // ---- view heading follows the swim direction with HeadingSmoother
+  const prevHeading = S.heading;
+  if (moving) S.target = dir;
+  headingStep(S.target ?? S.heading, dt);
+  resolveCollisions();     // the turn swings nose/tail: keep the posed body out of tall rocks
+  const yawRate = THREE.MathUtils.radToDeg(wrapPi(S.heading - prevHeading)) / Math.max(dt, 1e-4);
+  // smoothed turn rate drives the path-following body curl (natural mode); it builds
+  // quickly and unwinds a little slower so the tail visibly swings through after a turn
+  S.curlRate += (yawRate - S.curlRate) * (1 - Math.exp(-dt / (Math.abs(yawRate) > Math.abs(S.curlRate) ? 0.05 : 0.18)));
+  stepChain(dt);
+
+  // ---- FishFins.TickTurn + Step (pectorals)
+  //   turn  = SmoothDamp(turn, clamp01(|yawRate| / TurnRateForFullOpen), TurnSmoothSeconds)
+  //   fold → clamp01(animSpeed / cruise) at 1/SweepSeconds (folding) or 1/ReturnSeconds (opening)
+  //   pose  = smoothstep(fold) · (1 − turn · OpenOnTurn)
+  {
+    const tgt = clamp01(Math.abs(yawRate) / Math.max(P.pecTurnFull, 1));
+    const st = Math.max(P.pecTurnSmooth, 0.01), om = 2 / st, x = om * dt, ex = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+    const ch = S.pecTurn - tgt, tmp = (S.pecTurnVel + om * ch) * dt;
+    S.pecTurnVel = (S.pecTurnVel - om * tmp) * ex; S.pecTurn = tgt + (ch + tmp) * ex;
+    const foldT = moving ? clamp01((S.animSpeed ?? 0) / P.cruiseSpeed) : 0;
+    const spd = foldT > S.fold ? 1 / Math.max(P.pecSweepSec, 0.01) : 1 / Math.max(P.pecReturnSec, 0.01);
+    S.fold += THREE.MathUtils.clamp(foldT - S.fold, -spd * dt, spd * dt);
+    const f = clamp01(S.fold), sm = f * f * (3 - 2 * f);
+    S.pecPose = sm * (1 - clamp01(S.pecTurn) * P.pecOpenOnTurn);
+    S.flutter += 2 * Math.PI * P.pecFlutterHz * dt;
+  }
+
+  // ---- Animator "MovementAnimationSpeed" = WalkAnimationSpeed(v, 165, 1, 4.15), damped
+  const animTarget = (S.vel.length() / P.speed) * 1 * P.cruiseSpeed;
+  S.animSpeed += (animTarget - S.animSpeed) * (1 - Math.exp(-dt / Math.max(P.animDamp, 1e-3)));
+
+  // ---- FishTailSway.Step(dt, moving, speed = animator param)
+  const driveT = moving ? clamp01(S.animSpeed / Math.max(P.cruiseSpeed, 0.01)) : 0;
+  S.drive += (driveT - S.drive) * (1 - Math.exp(-dt / Math.max(P.tailBlend, 0.01)));
+  S.scale = P.atRest + (1 - P.atRest) * clamp01(S.drive);
+  S.phase += 2 * Math.PI * dt * S.scale * (1 + P.dashTailBoost * S.dashAmt) / Math.max(P.tailSeconds, 0.05);
+  if (S.phase > 2 * Math.PI) S.phase -= 2 * Math.PI;
+
+  // ---- FishSwimMotion.LateUpdate: swim blend, wag & idle phases
+  S.swim += ((moving ? 1 : 0) - S.swim) * (1 - Math.exp(-dt / Math.max(P.swimBlend, 0.01)));
+  const speedParam = Math.max(0.2, S.animSpeed);
+  S.wagPhase += 2 * Math.PI * P.wagHertz * dt * (0.33 + (speedParam - 0.33) * clamp01(S.swim));
+  S.idlePhase += 2 * Math.PI * P.idleHertz * dt;
+
+  // ---- FishSwimMotion.TickBank
+  const targetBank = THREE.MathUtils.clamp(yawRate * P.bankPerTurnRate, -P.maxBank, P.maxBank);
+  S.bank = smoothDamp(S.bank, targetBank, bankVel, Math.max(P.bankSmooth, 0.01), dt);
+
+  // ---- FishSwimMotion.TickRise
+  if (P.rise) {
+    S.riseTimer -= dt;
+    if (S.riseState === 'wait' && S.riseTimer <= 0) {
+      S.riseState = 'up'; S.riseT = 0; S.riseFrom = S.rise; S.riseTo = rand(...P.riseHeight); S.riseHold = rand(...P.riseHold);
+    }
+    if (S.riseState !== 'wait') {
+      S.riseT += dt;
+      const dur = S.riseState === 'up' ? P.riseUp : S.riseState === 'hold' ? S.riseHold : P.riseDown;
+      const k = clamp01(S.riseT / dur), e = k * k * (3 - 2 * k);
+      if (S.riseState === 'up') S.rise = THREE.MathUtils.lerp(S.riseFrom, S.riseTo, e);
+      if (S.riseState === 'down') S.rise = THREE.MathUtils.lerp(S.riseTo, 0, e);
+      if (k >= 1) {
+        S.riseT = 0;
+        S.riseState = S.riseState === 'up' ? 'hold' : S.riseState === 'hold' ? 'down' : 'wait';
+        if (S.riseState === 'wait') S.riseTimer = rand(...P.riseEvery);
+      }
+    }
+  } else S.rise *= Math.exp(-dt * 3);
+  // pitch follows the total vertical speed (TickRise rise + climbing over rocks)
+  const riseSpeed = (S.rise - S.prevRise) / Math.max(dt, 1e-4) + S.swimYVel; S.prevRise = S.rise;
+  S.pitch += (THREE.MathUtils.clamp(riseSpeed * P.risePitch, -25, 25) - S.pitch) * (1 - Math.exp(-dt * 10));
+
+  // ---- compose transform
+  // ---- swim height: hug the sand, lift over low rocks ahead, ease back down after
+  {
+    // look ahead along the motion with the body posed the way it is travelling, so the
+    // climb starts before the nose reaches the rock (smooth), and use the whole body's
+    // footprint — not just its centre — so the nose, tail and flanks clear the rock too
+    const mv = Math.hypot(S.vel.x, S.vel.z), mvDir = mv > 0.05 ? Math.atan2(S.vel.x, S.vel.z) : S.heading;
+    const ahead = (k) => {
+      const ax = S.pos.x + S.vel.x * P.climbLook * k, az = S.pos.z + S.vel.z * P.climbLook * k;
+      return Math.max(climbHeightAt(ax, az), bodyFloorAt(ax, az, mvDir));
+    };
+    const floor = bodyFloorAt(S.pos.x, S.pos.z, S.heading);
+    // also look a little to every side, so sliding sideways onto a rock (circling it)
+    // starts the climb early instead of hitting the hard floor below and popping up
+    let near = floor;
+    for (let i = 0; i < 8; i++) {
+      const a = i * Math.PI / 4;
+      near = Math.max(near, bodyFloorAt(S.pos.x + Math.sin(a) * CLIMB_MARGIN, S.pos.z + Math.cos(a) * CLIMB_MARGIN, S.heading));
+    }
+    const target = Math.max(P.swimHeight, climbHeightAt(S.pos.x, S.pos.z), near, ahead(0.5), ahead(1));
+    // ease time shrinks when moving faster than cruise (dash), so the climb keeps the same
+    // shape along the path instead of lagging behind and snapping onto the hard floor
+    const st = (target > S.swimY ? P.climbUp : P.climbDown) * Math.min(1, P.speed / Math.max(mv, 1e-3));
+    const om = 2 / st, x = om * dt, e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+    const ch = S.swimY - target, tmp = (S.swimYVel + om * ch) * dt;
+    S.swimYVel = (S.swimYVel - om * tmp) * e;
+    S.swimY = target + (ch + tmp) * e;
+    // hard floor: never let any part of the body sink into a rock it is over (the idle
+    // bob below dips by up to idleBob, so leave room for it); kill downward speed there
+    const tilted = bodyFloorAt(S.pos.x, S.pos.z, S.heading, true);
+    const hard = tilted > 0 ? tilted + P.idleBob : 0;
+    if (S.swimY < hard) { S.swimY = hard; S.swimYVel = Math.max(S.swimYVel, 0); }
+  }
+  const bob = Math.sin(S.idlePhase) * P.idleBob * (1 - 0.6 * S.swim);
+  fish.position.set(S.pos.x, S.swimY + S.rise + bob, S.pos.z);
+  fish.rotation.y = S.heading;
+  const sway = THREE.MathUtils.lerp(P.idleSway, 0, clamp01(S.swim)) * Math.sin(S.wagPhase);
+  tilt.rotation.set(-deg(S.pitch), deg(sway), -deg(S.bank));
+
+  uni.uPhase.value = S.phase;
+  uni.uFlutter.value = 0.004 + 0.006 * S.scale;
+  solveSpine(dt);
+  attachParts(t, dt);
+}
+
+// =============================================================================
+// Bubbles (FishFinBubbles / mouth bubbles)
+// =============================================================================
+// Look: a plain white sphere vanished against the pale sand, so the bubbles use a
+// "soap bubble" shader instead — almost clear in the middle, a soft blue-grey rim that
+// reads on the light background, and a bright white highlight spot.
+const BUB = 160;
+const bubbleMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  uniforms: { uRim: { value: new THREE.Color(0x3a7fae) }, uOpacity: { value: 1 } },
+  vertexShader: `
+    varying vec3 vN; varying vec3 vV;
+    void main() {
+      vec4 mv = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+      vN = normalize(normalMatrix * mat3(instanceMatrix) * normal);
+      vV = normalize(-mv.xyz);
+      gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    uniform vec3 uRim; uniform float uOpacity;
+    varying vec3 vN; varying vec3 vV;
+    void main() {
+      vec3 n = normalize(vN);
+      float f = 1.0 - clamp(dot(n, normalize(vV)), 0.0, 1.0);
+      float rim = smoothstep(0.2, 0.85, f);                        // edge ring
+      float hl = smoothstep(0.86, 0.96, dot(n, normalize(vec3(-0.45, 0.6, 0.66))));   // highlight
+      vec3 col = mix(vec3(0.85, 0.95, 1.0), uRim, rim);
+      col = mix(col, vec3(1.0), hl);
+      float a = (0.22 + 0.78 * rim + 0.9 * hl) * uOpacity;
+      gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
+    }`,
+});
+const bubbles = new THREE.InstancedMesh(new THREE.SphereGeometry(0.012, 16, 12), bubbleMat, BUB);
+bubbles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+bubbles.frustumCulled = false;
+scene.add(bubbles);
+const bub = Array.from({ length: BUB }, () => ({ life: 0, p: new THREE.Vector3(), v: new THREE.Vector3(), s: 1 }));
+let bubI = 0, bubAcc = 0;
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _p = new THREE.Vector3();
+function bubbleStep(dt) {
+  bubAcc += dt * (0.35 + 2.5 * P.bubbleRate * S.swim * S.scale + (P.dashFx ? 22 * S.dashAmt : 0));
+  while (bubAcc > 1) {
+    bubAcc -= 1;
+    const pec = pecs[bubI & 1];
+    pec.getWorldPosition(_p);
+    const b = bub[bubI++ % BUB];
+    b.life = b.life0 = rand(1.0, 1.8); b.p.copy(_p); b.s = rand(0.6, 1.3) * P.bubbleSize;
+    b.w = rand(0, 6.3);                                      // wobble phase
+    b.v.set(-Math.sin(S.heading) * 0.12 + rand(-0.05, 0.05), rand(0.2, 0.4), -Math.cos(S.heading) * 0.12 + rand(-0.05, 0.05));
+  }
+  bub.forEach((b, i) => {
+    if (b.life > 0) {
+      b.life -= dt; b.p.addScaledVector(b.v, dt); b.v.x *= 0.97; b.v.z *= 0.97;
+      b.w += dt * 9; b.p.x += Math.sin(b.w) * 0.02 * dt; b.p.z += Math.cos(b.w * 0.8) * 0.02 * dt;   // zig-zag rise
+    }
+    // pop in quickly, grow a little as it rises, shrink away at the end
+    const age = b.life > 0 ? 1 - b.life / b.life0 : 1;
+    _s.setScalar(b.life > 0 ? b.s * Math.min(1, age * 12) * (1 + 0.35 * age) * Math.min(1, b.life * 3) : 0);
+    bubbles.setMatrixAt(i, _m.compose(b.p, _q, _s));
+  });
+  bubbles.instanceMatrix.needsUpdate = true;
+}
+
+// =============================================================================
+// Dash effects: water streaks behind the tail and pectoral fins, a ring pushed off at
+// the start, a puff of sand kicked up, a short body stretch and a small FOV kick
+// =============================================================================
+const fx = { amt: 0 };
+const TRAIL_N = 28;
+const trailMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  uniforms: { uColor: { value: new THREE.Color(0xffffff) } },
+  vertexShader: `attribute float aAlpha; varying float vA;
+    void main(){ vA = aAlpha; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `uniform vec3 uColor; varying float vA;
+    void main(){ gl_FragColor = vec4(uColor, vA); }`,
+});
+function makeTrail(width, life) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TRAIL_N * 6), 3).setUsage(THREE.DynamicDrawUsage));
+  geo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(TRAIL_N * 2), 1).setUsage(THREE.DynamicDrawUsage));
+  const idx = [];
+  for (let i = 0; i < TRAIL_N - 1; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  geo.setIndex(idx);
+  const mesh = new THREE.Mesh(geo, trailMat);
+  mesh.frustumCulled = false; mesh.renderOrder = 2;
+  scene.add(mesh);
+  // points live in a fixed ring buffer (newest = head) so nothing is allocated per frame
+  const buf = Array.from({ length: TRAIL_N }, () => ({ x: 0, y: 0, z: 0, age: 0, k: 0 }));
+  return { mesh, width, life, buf, head: 0, n: 0, idle: false };
+}
+// tail streak (wide) + one thin streak per pectoral fin
+const trails = [makeTrail(0.2, 0.42), makeTrail(0.045, 0.32), makeTrail(0.045, 0.32)];
+function trailStep(tr, p, k, dt) {
+  const N = TRAIL_N, at = (i) => tr.buf[(tr.head + i) % N];
+  for (let i = 0; i < tr.n; i++) at(i).age += dt;
+  while (tr.n && at(tr.n - 1).age > tr.life) tr.n--;
+  if (k > 0.02) {
+    tr.head = (tr.head + N - 1) % N;
+    const q = tr.buf[tr.head]; q.x = p.x; q.y = p.y; q.z = p.z; q.age = 0; q.k = k;
+    if (tr.n < N) tr.n++;
+  }
+  const n = tr.n;
+  if (n === 0 && tr.idle) return;                // already cleared: skip the GPU upload too
+  tr.idle = n === 0;
+  const pos = tr.mesh.geometry.attributes.position.array, al = tr.mesh.geometry.attributes.aAlpha.array;
+  for (let i = 0; i < N; i++) {
+    const o = i * 6;
+    if (i >= n) { al[i * 2] = al[i * 2 + 1] = 0; if (n) pos.copyWithin(o, (n - 1) * 6, n * 6); continue; }
+    const q = at(i), a = at(Math.max(0, i - 1)), b = at(Math.min(n - 1, i + 1));
+    let dx = a.x - b.x, dz = a.z - b.z; const l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l;
+    const f = 1 - q.age / tr.life;                                 // 1 = fresh, 0 = gone
+    const w = tr.width * q.k * (0.3 + 0.7 * f) * 0.5;              // tapers as it ages
+    pos[o] = q.x - dz * w; pos[o + 1] = q.y; pos[o + 2] = q.z + dx * w;
+    pos[o + 3] = q.x + dz * w; pos[o + 4] = q.y; pos[o + 5] = q.z - dx * w;
+    al[i * 2] = al[i * 2 + 1] = 0.75 * q.k * f * f;
+  }
+  tr.mesh.geometry.attributes.position.needsUpdate = true;
+  tr.mesh.geometry.attributes.aAlpha.needsUpdate = true;
+}
+// ring pushed off where the dash starts
+const ringGeo = new THREE.RingGeometry(0.86, 1, 48); ringGeo.rotateX(-Math.PI / 2);
+const rings = Array.from({ length: 3 }, () => {
+  const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthWrite: false }));
+  m.visible = false; m.renderOrder = 2; scene.add(m);
+  return { m, t: 1 };
+});
+let ringI = 0;
+// sand kicked up from the bottom under the fish
+const PUFF = 24;
+const puffMesh = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 0),
+  new THREE.MeshBasicMaterial({ color: 0xf4ead2, transparent: true, opacity: 0.55, depthWrite: false }), PUFF);
+puffMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); puffMesh.frustumCulled = false;
+scene.add(puffMesh);
+const puffs = Array.from({ length: PUFF }, () => ({ life: 0, max: 1, p: new THREE.Vector3(), v: new THREE.Vector3(), s: 1 }));
+let puffI = 0;
+const _tail = new THREE.Vector3(), _pec = new THREE.Vector3();
+function fxStep(dt) {
+  const on = P.dashFx;
+  // smoothed dash strength: snaps up, eases off
+  fx.amt += ((on ? S.dashAmt : 0) - fx.amt) * (1 - Math.exp(-dt / (S.dashAmt > fx.amt ? 0.05 : 0.22)));
+  if (S.dashStarted) {
+    S.dashStarted = false;
+    if (on) {
+      const r = rings[ringI++ % rings.length];
+      r.t = 0; r.m.visible = true; r.m.position.set(fish.position.x, fish.position.y - 0.02, fish.position.z);
+      // sand puff, mostly to the sides and behind the fish
+      const bx = -Math.sin(S.dashDir), bz = -Math.cos(S.dashDir);
+      for (let i = 0; i < 12; i++) {
+        const q = puffs[puffI++ % PUFF], a = rand(0, Math.PI * 2), sp = rand(0.3, 0.9);
+        q.life = q.max = rand(0.5, 0.9); q.s = rand(0.025, 0.05);
+        q.p.set(S.pos.x + bx * 0.15 + rand(-0.08, 0.08), 0.03, S.pos.z + bz * 0.15 + rand(-0.08, 0.08));
+        q.v.set(Math.cos(a) * sp + bx * 0.6, rand(0.15, 0.4), Math.sin(a) * sp + bz * 0.6);
+      }
+    }
+  }
+  // streaks: tail tip and both pectoral fins
+  fish.updateMatrixWorld();
+  const sp = spineAt(1);
+  tilt.localToWorld(_tail.set(sp.x, 0, sp.z));
+  trailStep(trails[0], _tail, on ? fx.amt : 0, dt);
+  for (let i = 0; i < 2; i++) { pecs[i].getWorldPosition(_pec); trailStep(trails[i + 1], _pec, on ? fx.amt : 0, dt); }
+  // rings expand and fade
+  for (const r of rings) {
+    if (!r.m.visible) continue;
+    r.t += dt / 0.45;
+    if (r.t >= 1) { r.m.visible = false; continue; }
+    const e = 1 - (1 - r.t) ** 3;
+    r.m.scale.setScalar(0.15 + 0.85 * e);
+    r.m.material.opacity = 0.5 * (1 - r.t);
+  }
+  // sand puffs drift out, slow down, swell and shrink away
+  puffs.forEach((q, i) => {
+    if (q.life > 0) {
+      q.life -= dt; q.p.addScaledVector(q.v, dt);
+      q.v.multiplyScalar(Math.exp(-dt * 4)); q.v.y -= 0.15 * dt;
+    }
+    const k = q.life > 0 ? q.life / q.max : 0;
+    _s.setScalar(k > 0 ? q.s * (1 + 2.5 * (1 - k)) * Math.min(1, k * 3) : 0);
+    puffMesh.setMatrixAt(i, _m.compose(q.p, _q, _s));
+  });
+  puffMesh.instanceMatrix.needsUpdate = true;
+  // body stretches a little along the dash
+  tilt.scale.set(1 - 0.05 * fx.amt, 1 - 0.03 * fx.amt, 1 + 0.09 * fx.amt);
+}
+
+// =============================================================================
+// FloatingJoystick: appears where you press, knob clamped to Radius
+// =============================================================================
+// Double-tap = dash. To keep swimming through a double tap, a released stick holds its
+// value for a short grace period, and a press inside that period re-uses the old stick
+// centre, so the finger lands back on the same direction instead of a fresh, centred stick.
+const joy = { active: false, id: null, ox: 0, oy: 0, x: 0, y: 0,
+  downT: 0, downX: 0, downY: 0, upT: -1e9, tapT: -1e9, tapX: 0, tapY: 0 };
+const joyEl = document.getElementById('joy'), baseEl = document.getElementById('joyBase'), knobEl = document.getElementById('joyKnob');
+const hintEl = document.getElementById('hint');
+function layoutJoy() {
+  const R = P.joyRadius;
+  baseEl.style.width = baseEl.style.height = R * 2 + 'px';
+  baseEl.style.left = joy.ox + 'px'; baseEl.style.top = joy.oy + 'px';
+  knobEl.style.left = joy.ox + joy.x * R + 'px'; knobEl.style.top = joy.oy + joy.y * R + 'px';
+}
+const canvas = renderer.domElement;
+const pipsEl = document.getElementById('pips');
+const queueDash = () => { S.dashBuf = P.dashBuffer; hintEl.style.opacity = 0; };
+function setStick(cx, cy) {
+  let dx = (cx - joy.ox) / P.joyRadius, dy = (cy - joy.oy) / P.joyRadius;
+  const m = Math.hypot(dx, dy);
+  if (m > 1) { dx /= m; dy /= m; }
+  joy.x = dx; joy.y = dy;
+}
+canvas.addEventListener('pointerdown', (e) => {
+  if (joy.active) return;
+  const now = performance.now();
+  // second tap close in time and place to the previous tap → dash
+  if (now - joy.tapT < P.dblTapMs && Math.hypot(e.clientX - joy.tapX, e.clientY - joy.tapY) < P.dblTapDist) {
+    queueDash(); joy.tapT = -1e9;
+  }
+  const resume = now - joy.upT < P.joyGraceMs;      // keep the old stick centre
+  Object.assign(joy, { active: true, id: e.pointerId, downT: now, downX: e.clientX, downY: e.clientY });
+  if (resume) setStick(e.clientX, e.clientY);
+  else Object.assign(joy, { ox: e.clientX, oy: e.clientY, x: 0, y: 0 });
+  canvas.setPointerCapture(e.pointerId);
+  joyEl.style.display = 'block'; joyEl.style.opacity = 1; layoutJoy();
+  hintEl.style.opacity = 0;
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (!joy.active || e.pointerId !== joy.id) return;
+  setStick(e.clientX, e.clientY); layoutJoy();
+});
+// release: remember quick, still presses as taps; the stick value is held for joyGraceMs
+const releaseJoy = (e) => {
+  const now = performance.now();
+  if (e && now - joy.downT < P.tapMs && Math.hypot(e.clientX - joy.downX, e.clientY - joy.downY) < P.tapMove) {
+    joy.tapT = now; joy.tapX = e.clientX; joy.tapY = e.clientY;
+  }
+  joy.active = false; joy.id = null; joy.upT = now;
+  joyEl.style.opacity = 0.45;
+};
+const dropJoy = () => { joy.active = false; joy.id = null; joy.upT = -1e9; joy.x = joy.y = 0; joyEl.style.display = 'none'; };
+canvas.addEventListener('pointerup', (e) => { if (e.pointerId === joy.id) releaseJoy(e); });
+canvas.addEventListener('pointercancel', (e) => { if (e.pointerId === joy.id) dropJoy(); });
+addEventListener('blur', () => dropJoy());
+
+// ---- dash input: double tap (above) or Space on a keyboard
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space' && !e.repeat) { e.preventDefault(); queueDash(); }
+});
+// stamina pips: full ones are filled, the refilling one fills up from the bottom
+const pipCache = [];
+let pipEmpty = null;
+function buildPips() {
+  pipsEl.innerHTML = '';
+  for (let i = 0; i < P.dashCharges; i++) pipsEl.appendChild(document.createElement('i')).appendChild(document.createElement('b'));
+  S.charges = Math.min(S.charges, P.dashCharges);
+  pipCache.length = 0;
+}
+buildPips();
+// only touch the DOM when a pip visibly changes (whole percent), so the page doesn't
+// re-style every frame (pipCache / pipEmpty are declared above buildPips)
+function updateDashUI() {
+  const fills = pipsEl.children;
+  for (let i = 0; i < fills.length; i++) {
+    const f = i < S.charges ? 1 : i === S.charges ? S.regen / P.dashRegen : 0;
+    const pct = Math.round(f * 100);
+    if (pipCache[i] !== pct) { pipCache[i] = pct; fills[i].firstChild.style.height = pct + '%'; }
+  }
+  const empty = S.charges < 1;
+  if (empty !== pipEmpty) { pipEmpty = empty; pipsEl.classList.toggle('empty', empty); }
+}
+const _fwd = new THREE.Vector3(), _right = new THREE.Vector3();
+// joystick only: screen-space stick → world direction relative to the camera
+function readInput() {
+  // grace period over with no new press → the stick really lets go
+  if (!joy.active && joy.upT > 0 && performance.now() - joy.upT > P.joyGraceMs) dropJoy();
+  const x = joy.x, y = joy.y;
+  camera.getWorldDirection(_fwd); _fwd.y = 0; _fwd.normalize();
+  _right.crossVectors(_fwd, camera.up).normalize();
+  return { x: _right.x * x - _fwd.x * y, z: _right.z * x - _fwd.z * y };
+}
+
+// =============================================================================
+// CameraRig: pos = focus + Euler(pitch,0,0)·(0, 0.01, −distance)
+// =============================================================================
+const focus = new THREE.Vector3();
+const camVel = { x: 0, z: 0 };
+const _off = new THREE.Vector3(), _ax = new THREE.Vector3(1, 0, 0);
+function updateCamera(dt, snap) {
+  if (snap) { focus.copy(S.pos); camVel.x = camVel.z = 0; }
+  else {
+    // Unity-style SmoothDamp per axis: critically damped, no overshoot, no jitter
+    const st = Math.max(P.camSmooth, 1e-3), om = 2 / st, x = om * dt, e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+    for (const a of ['x', 'z']) {
+      const ch = focus[a] - S.pos[a], tmp = (camVel[a] + om * ch) * dt;
+      camVel[a] = (camVel[a] - om * tmp) * e;
+      focus[a] = S.pos[a] + (ch + tmp) * e;
+    }
+    focus.y = S.pos.y;
+  }
+  _off.set(0, 0.01, -P.camDistance).applyAxisAngle(_ax, deg(P.camPitch));
+  camera.position.copy(focus).add(_off);
+  camera.lookAt(focus.x, focus.y + 0.01, focus.z);
+  const fov = P.camFov + (P.dashFx ? P.dashFov * fx.amt : 0);     // small kick while dashing
+  if (Math.abs(camera.fov - fov) > 1e-3) { camera.fov = fov; camera.updateProjectionMatrix(); }
+  sun.position.set(focus.x - 4, 10, focus.z + 3); sun.target.position.copy(focus);
+}
+
+// =============================================================================
+// Tuning panel
+// =============================================================================
+const gui = new GUI({ title: 'Tuning' });
+const gc = gui.addFolder('Camera (CameraRig)');
+gc.add(P, 'camPitch', 15, 89, 0.5).name('pitch °');
+gc.add(P, 'camDistance', 1, 20, 0.05).name('distance');
+gc.add(P, 'camFov', 20, 80, 1).name('FOV');
+gc.add(P, 'camSmooth', 0.02, 1, 0.01).name('follow smooth s');
+const gcf = gui.addFolder('Control feel');
+gcf.add(P, 'steerInstant').name('instant direction (game)');
+gcf.add(P, 'steerRate', 180, 1800, 10).name('steer °/s');
+gcf.add(P, 'steerSmooth', 0.01, 0.4, 0.01).name('steer easing s');
+gcf.add(P, 'velSmooth', 0.01, 0.5, 0.01).name('speed easing s');
+gcf.add(P, 'stickSmooth', 0.0, 0.3, 0.01).name('joystick smoothing s');
+gcf.add(P, 'steerMinStick', 0, 0.4, 0.01).name('steer dead-zone');
+const gm = gui.addFolder('Movement');
+gm.add(P, 'speed', 0.3, 5, 0.05).name('speed m/s');
+const turnCtrls = [];
+gm.add(P, 'rig', { 'hero (997°/s · 0.024 s)': 'hero', 'fish skins (540°/s · 0.1 s)': 'skin' }).name('TurnSettings').onChange((v) => {
+  P.turnRate = v === 'hero' ? 997 : 540; P.turnSmooth = v === 'hero' ? 0.024 : 0.1;
+  turnCtrls.forEach((c) => c.updateDisplay());
+});
+turnCtrls.push(gm.add(P, 'turnRate', 90, 1500, 1).name('MaxTurnRate °/s'));
+turnCtrls.push(gm.add(P, 'turnSmooth', 0.005, 0.4, 0.001).name('TurnSmoothTime s'));
+const gt = gui.addFolder('FishTailSway');
+gt.add(P, 'tailDegrees', 0, 60, 0.5).name('Degrees');
+gt.add(P, 'tailSeconds', 0.2, 2, 0.01).name('Seconds');
+gt.add(P, 'atRest', 0, 1, 0.01).name('AtRest');
+gt.add(P, 'tailBlend', 0.05, 2, 0.01).name('BlendSeconds');
+gt.add(P, 'bodyDegrees', 0, 30, 0.5).name('BodyDegrees');
+gt.add(P, 'headDegrees', 0, 20, 0.5).name('HeadDegrees');
+gt.add(P, 'lagDegrees', -90, 90, 1).name('LagDegrees');
+gt.add(P, 'cruiseSpeed', 0.5, 8, 0.05).name('cruiseAnimationSpeed');
+gt.add(P, 'finFollow', 0, 1, 0.05).name('fin follow-through');
+gt.add(P, 'tailHinge', 0.5, 0.85, 0.01).name('tail hinge (0.62 = video)');
+gt.add(P, 'tailJointSoft', 0.01, 0.15, 0.005).name('tail joint softness');
+const gn = gui.addFolder('Body motion');
+gn.add(P, 'motion', { 'natural (body wave)': 'natural', 'game formula (raw)': 'game' }).name('model');
+gn.add(P, 'natHead', 0, 15, 0.5).name('head amp °');
+gn.add(P, 'natTail', 0, 45, 0.5).name('tail-stalk amp °');
+gn.add(P, 'natWave', 0.4, 2, 0.05).name('wavelength (body)');
+gn.add(P, 'natRecoil', 0, 10, 0.5).name('recoil °');
+gn.add(P, 'turnTailBend', 0, 2, 0.05).name('tail bend on turns');
+gn.add(P, 'turnBendStart', 0.3, 0.7, 0.01).name('bend starts at (body %)');
+gn.add(P, 'stalkCurve', 0, 1.5, 0.05).name('tail stalk curve');
+gn.add(P, 'natCurl', 0, 2, 0.05).name('turn curl (natural mode)');
+gn.add(P, 'curlHz', 1, 12, 0.1).name('curl stiffness Hz');
+gn.add(P, 'curlDamp', 0.1, 1.2, 0.01).name('curl damping');
+gn.add(P, 'curlLoose', 0, 0.8, 0.01).name('tail looseness');
+gn.add(P, 'curlBigTurn', 0, 3, 0.05).name('U-turn fold boost');
+gn.add(P, 'curlMaxFold', 30, 140, 1).name('max fold °');
+gn.open();
+gt.add(P, 'finSpringHz', 0.5, 8, 0.1).name('fin spring Hz');
+gt.add(P, 'finSpringDamp', 0.05, 1, 0.01).name('fin spring damping');
+const gf = gui.addFolder('FishFins (pectorals)');
+gf.add(P, 'pecSweep', 0, 90, 1).name('SweepDegrees');
+gf.add(P, 'pecOpenOnTurn', 0, 1, 0.05).name('OpenOnTurn');
+gf.add(P, 'pecFlutter', 0, 10, 0.1).name('FlutterDegrees');
+gf.add(P, 'pecRest', -10, 70, 1).name('rest angle back °');
+gf.add(P, 'pecFeather', 0, 90, 1).name('feather on return °');
+const gs = gui.addFolder('FishSwimMotion');
+gs.add(P, 'maxBank', 0, 45, 1).name('MaxBankDegrees');
+gs.add(P, 'bankPerTurnRate', 0, 0.2, 0.005).name('BankPerTurnRate');
+gs.add(P, 'bankSmooth', 0.01, 1, 0.01).name('BankSmoothSeconds');
+gs.add(P, 'idleSway', 0, 10, 0.1).name('IdleSwayDegrees');
+gs.add(P, 'rise').name('Rise');
+gui.add(P, 'joyRadius', 30, 160, 1).name('joystick radius px');
+const gd = gui.addFolder('Dash (lao)');
+gd.add(P, 'dashDist', 1, 6, 0.1).name('distance (body lengths)');
+gd.add(P, 'dashTime', 0.1, 0.6, 0.01).name('duration s');
+gd.add(P, 'dashCharges', 1, 5, 1).name('stamina charges').onChange(buildPips);
+gd.add(P, 'dashRegen', 0.5, 6, 0.1).name('refill s per charge');
+gd.add(P, 'dashTailBoost', 0, 5, 0.1).name('tail beat boost');
+gd.add(P, 'dashSteer', 0, 720, 10).name('steer while dashing °/s');
+gd.add(P, 'dashFx').name('dash effects');
+gd.add(P, 'dashFov', 0, 15, 0.5).name('camera kick °');
+gui.add(P, 'pillars').name('rock pillars (test map)').onChange(applyMap);
+const gb = gui.addFolder('Bubbles');
+gb.add(P, 'bubbleSize', 0.5, 3, 0.05).name('bubble size');
+gb.add(P, 'bubbleRate', 0, 4, 0.1).name('bubbles while swimming');
+gui.add(P, 'showFps').name('show fps').onChange((v) => { document.getElementById('fps').style.display = v ? 'block' : 'none'; });
+gui.add(P, 'autoQuality').name('auto quality');
+gd.add(P, 'dblTapMs', 150, 500, 10).name('double-tap window ms');
+gui.add(P, 'stopSmooth', 0, 1, 0.01).name('stop glide s');
+gd.add(P, 'joyGraceMs', 0, 600, 10).name('stick hold after release ms');
+const go = gui.addFolder('Rocks');
+go.add(P, 'fishBelly', 0.04, 0.2, 0.005).name('height over low rocks');
+go.add(P, 'climbUp', 0.05, 0.6, 0.01).name('rise smoothing s');
+go.add(P, 'avoidLook', 0.4, 2.5, 0.05).name('avoid look-ahead m');
+go.add(P, 'avoidSteer', 0, 60, 1).name('avoid steer °');
+go.add(P, 'avoidSmooth', 0.05, 0.8, 0.01).name('avoid smoothing s');
+gui.close();
+
+// =============================================================================
+// Loop
+// =============================================================================
+// Frame pacing. rAF timestamps wobble by 1–2 ms and a frame now and then misses a vsync.
+// Stepping the sim with that raw delta makes motion drift against the display's fixed
+// refresh, which reads as stutter. Instead: estimate the refresh interval (median of recent
+// deltas, snapped to common rates), step in whole refresh intervals, and carry the leftover
+// in a drift accumulator so sim time stays locked to real time.
+const pace = { last: -1, hist: [], sorted: new Float64Array(64), interval: 1000 / 60, drift: 0, slow: [], fpsT: 0, fpsN: 0, fps: 0, fpsNew: false };
+const RATES = [30, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240];
+function frameDt(now) {
+  if (pace.last < 0) { pace.last = now; return pace.interval / 1000; }
+  const raw = now - pace.last; pace.last = now;
+  if (raw > 250) { pace.drift = 0; return pace.interval / 1000; }   // tab was hidden: no jump
+  pace.hist.push(raw); if (pace.hist.length > 45) pace.hist.shift();
+  // median without allocating: copy into a fixed typed array and sort that in place
+  const hs = pace.sorted.subarray(0, pace.hist.length);
+  for (let i = 0; i < pace.hist.length; i++) hs[i] = pace.hist[i];
+  hs.sort();
+  const med = hs[hs.length >> 1];
+  pace.interval = med;
+  for (const hz of RATES) { const iv = 1000 / hz; if (Math.abs(med - iv) < iv * 0.07) { pace.interval = iv; break; } }
+  pace.drift += raw;
+  const maxN = Math.max(1, Math.floor(50 / pace.interval));        // never more than 50 ms per step
+  const n = THREE.MathUtils.clamp(Math.round(pace.drift / pace.interval), 1, maxN);
+  pace.drift -= n * pace.interval;
+  if (Math.abs(pace.drift) > pace.interval * 3) pace.drift = 0;     // long hitch: resync, don't catch up
+  // remember which frames missed a refresh, for adaptive quality
+  pace.slow.push(n > 1 ? 1 : 0); if (pace.slow.length > 120) pace.slow.shift();
+  pace.fpsN++; pace.fpsT += raw;
+  if (pace.fpsT >= 500) { pace.fps = pace.fpsN * 1000 / pace.fpsT; pace.fpsN = pace.fpsT = 0; pace.fpsNew = true; }
+  // bleed leftover drift in gently (≤5% of a frame) so sim time never wanders from real time
+  const corr = THREE.MathUtils.clamp(pace.drift * 0.05, -0.05 * pace.interval, 0.05 * pace.interval);
+  pace.drift -= corr;
+  return (n * pace.interval + corr) / 1000;
+}
+// Adaptive quality: if more than 1 in 5 frames misses a refresh over ~2 s, drop the render
+// resolution a step, then soften the shadows. Never goes back up within a session.
+const quality = { level: 0, cooldown: 0 };
+const QUALITY = [
+  () => renderer.setPixelRatio(Math.min(devicePixelRatio, 2)),
+  () => renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5)),
+  () => renderer.setPixelRatio(1),
+  () => { sun.shadow.mapSize.set(1024, 1024); sun.shadow.map?.dispose(); sun.shadow.map = null; renderer.shadowMap.type = THREE.PCFShadowMap; renderer.shadowMap.needsUpdate = true; },
+];
+function adaptQuality(dt) {
+  quality.cooldown -= dt;
+  if (!P.autoQuality || quality.cooldown > 0 || pace.slow.length < 120 || quality.level >= QUALITY.length - 1) return;
+  const missRate = pace.slow.reduce((a, b) => a + b, 0) / pace.slow.length;
+  if (missRate > 0.2) {
+    QUALITY[++quality.level]();
+    renderer.setSize(innerWidth, innerHeight);
+    pace.slow.length = 0; quality.cooldown = 2;
+  }
+}
+const fpsEl = document.getElementById('fps');
+updateCamera(0, true);
+// Warm-up: draw one frame with every effect and the pillar layout visible, so all shader
+// programs (incl. shadow-depth variants) compile now instead of the first time a dash or
+// a toggle shows them — a fresh compile can stall a frame for tens of ms.
+{
+  const hidden = [...rings.map((r) => r.m), ...extraObjs].filter((o) => !o.visible);
+  for (const o of hidden) o.visible = true;
+  renderer.render(scene, camera);
+  for (const o of hidden) o.visible = false;
+}
+renderer.setAnimationLoop((now) => {
+  const dt = frameDt(now);
+  adaptQuality(dt);
+  // fps text refreshes twice a second, not every frame
+  if (P.showFps && pace.fpsNew) { pace.fpsNew = false; fpsEl.textContent = `${pace.fps.toFixed(0)} fps · ${(1000 / pace.interval).toFixed(0)} Hz · q${quality.level}`; }
+  const t = (time.value += dt);
+  step(readInput(), dt, t);
+  bubbleStep(dt);
+  fxStep(dt);
+  updateDashUI();
+  updateCamera(dt, false);
+  renderer.render(scene, camera);
+});
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+window.__demo = { P, S, camera, uni, boneAng, solveSpine, step, renderer, scene, updateCamera, fish, tilt, time, OBST, climbHeightAt, fxStep, bubbleStep, applyMap, frameDt, pace, quality };
+</script>
+</body>
+</html>
