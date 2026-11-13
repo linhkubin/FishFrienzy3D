@@ -58,7 +58,9 @@ const P = {
   dashSteer: 260,          // °/s the stick can turn the fish while dashing
   stopSmooth: 0.35,        // s: glide to a stop instead of halting instantly
   pillars: false,          // test layout with tall rock pillars (false = original open map)
-  bubbleSize: 2.8, bubbleRate: 1.6,   // swim bubbles: size and amount multipliers
+  bubbleSize: 2.1, bubbleRate: 1.5,   // swim bubbles: size and amount multipliers
+  // fin trails: soft ribbons behind the tail-fin lobes and pectoral fins while swimming
+  finTrail: true, trailLife: 0.45, trailWidth: 0.016, trailOpacity: 0.85,
   showFps: false, autoQuality: true,   // fps meter; lower resolution/shadows if frames drop
   dashFx: true, dashFov: 5, // dash effects on/off; camera FOV kick (°) at the dash peak
   // double tap: second press within dblTapMs of a quick tap (shorter than tapMs, moved
@@ -106,6 +108,13 @@ const P = {
   // game: MaxBankDegrees 20; the video shows the fish rolling much further in turns
   bankPerTurnRate: 0.06, maxBank: 35, bankSmooth: 0.09,
   // FishSwimMotion.TickRise: RiseEvery, RiseHeight, RiseUp, RiseHold, RiseDown, RisePitchPerSpeed [APK]
+  // swim band (per level / "tầng"): the fish keeps gliding up and down between
+  // swimHeight and swimHeight + bandHeight in a slow, slightly irregular rhythm.
+  // band = false → the old random TickRise hops instead.
+  band: true, bandHeight: 0.22, bandPeriod: 5.0,
+  // never still: with the stick released the fish hovers — drifts a little forward and
+  // back along its heading and rocks gently (pitch / roll) instead of freezing in place
+  driftAmp: 0.05, driftPeriod: 3.2, idleRoll: 4, idlePitch: 3,
   rise: true, riseEvery: [3, 8], riseHeight: [0.12, 0.3], riseUp: 1.1, riseHold: [0.8, 2.0], riseDown: 1.6, risePitch: 60,
   // model: mesh ≈ 0.61 long × Model scale 0.829, centre ≈ 0.235 above ground               [APK]
   fishLength: 0.5, swimHeight: 0.19,     // low over the sand ("là là"); game model sits at 0.235
@@ -540,6 +549,7 @@ const S = {
   drive: 0, scale: P.atRest, phase: 0,
   // FishSwimMotion
   swim: 0, wagPhase: 0, idlePhase: 0, bank: 0, bankVel: 0,
+  bandPhase: rand(0, 6.28), driftPhase: 0,
   rise: 0, riseState: 'wait', riseTimer: rand(3, 8), riseFrom: 0, riseTo: 0, riseT: 0, riseHold: 1, prevRise: 0, pitch: 0,
   blink: rand(1.4, 3.2), blinkT: 0, jaw: 0,
   finS: 0, finV: 0, fold: 0, pecTurn: 0, pecTurnVel: 0, flutter: 0, curlRate: 0, inX: 0, inZ: 0,
@@ -931,6 +941,12 @@ function step(input, dt, t) {
   S.spd = (S.spd ?? 0) + (tgtSpd - (S.spd ?? 0)) * (1 - Math.exp(-dt / Math.max(spdSm, 1e-3)));
   S.vel.set(Math.sin(dir) * S.spd, 0, Math.cos(dir) * S.spd);
   S.pos.addScaledVector(S.vel, dt);
+  // hover drift: gentle forward / back surge along the heading, fading in as the fish
+  // stops (S.swim → 0) and out as it swims; position-only, so the tail stays relaxed
+  S.driftPhase += 2 * Math.PI * dt / Math.max(P.driftPeriod, 0.3);
+  const idleK = 1 - clamp01(S.swim);
+  const surge = P.driftAmp * (2 * Math.PI / Math.max(P.driftPeriod, 0.3)) * Math.cos(S.driftPhase) * idleK;
+  S.pos.x += Math.sin(S.heading) * surge * dt; S.pos.z += Math.cos(S.heading) * surge * dt;
   resolveCollisions();
   // dash burst: speed ∝ k·(1−k)² over dashTime — eases in, peaks at a third of the dash,
   // then glides out to zero — and covers exactly dashDist body lengths (∫ = 1/12).
@@ -998,11 +1014,20 @@ function step(input, dt, t) {
   S.idlePhase += 2 * Math.PI * P.idleHertz * dt;
 
   // ---- FishSwimMotion.TickBank
-  const targetBank = THREE.MathUtils.clamp(yawRate * P.bankPerTurnRate, -P.maxBank, P.maxBank);
+  // + a slow idle roll so a hovering fish rocks side to side (a little while swimming too)
+  const hoverK = 1 - clamp01(S.swim);
+  const targetBank = THREE.MathUtils.clamp(yawRate * P.bankPerTurnRate, -P.maxBank, P.maxBank)
+    + P.idleRoll * Math.sin(S.driftPhase * 0.63 + 1.3) * (0.35 + 0.65 * hoverK);
   S.bank = smoothDamp(S.bank, targetBank, bankVel, Math.max(P.bankSmooth, 0.01), dt);
 
-  // ---- FishSwimMotion.TickRise
-  if (P.rise) {
+  // ---- swim band: smooth up / down cycle inside the level's band. The phase speed wobbles
+  // ±20% so the rhythm never looks mechanical; eased in so toggling it doesn't jump.
+  if (P.band) {
+    S.bandPhase += 2 * Math.PI * dt / Math.max(P.bandPeriod, 0.5) * (1 + 0.2 * Math.sin(S.bandPhase * 0.37 + 0.8));
+    const want = P.bandHeight * (0.5 - 0.5 * Math.cos(S.bandPhase));
+    S.rise += (want - S.rise) * (1 - Math.exp(-dt * 4));
+    S.riseState = 'wait';
+  } else if (P.rise) {
     S.riseTimer -= dt;
     if (S.riseState === 'wait' && S.riseTimer <= 0) {
       S.riseState = 'up'; S.riseT = 0; S.riseFrom = S.rise; S.riseTo = rand(...P.riseHeight); S.riseHold = rand(...P.riseHold);
@@ -1022,7 +1047,9 @@ function step(input, dt, t) {
   } else S.rise *= Math.exp(-dt * 3);
   // pitch follows the total vertical speed (TickRise rise + climbing over rocks)
   const riseSpeed = (S.rise - S.prevRise) / Math.max(dt, 1e-4) + S.swimYVel; S.prevRise = S.rise;
-  S.pitch += (THREE.MathUtils.clamp(riseSpeed * P.risePitch, -25, 25) - S.pitch) * (1 - Math.exp(-dt * 10));
+  // + nose dips slightly as the hover drift pushes forward, lifts as it eases back
+  const pitchWob = P.idlePitch * Math.sin(S.driftPhase + 0.6) * hoverK;
+  S.pitch += (THREE.MathUtils.clamp(riseSpeed * P.risePitch + pitchWob, -25, 25) - S.pitch) * (1 - Math.exp(-dt * 10));
 
   // ---- compose transform
   // ---- swim height: hug the sand, lift over low rocks ahead, ease back down after
@@ -1072,64 +1099,212 @@ function step(input, dt, t) {
 // =============================================================================
 // Bubbles (FishFinBubbles / mouth bubbles)
 // =============================================================================
-// Look: a plain white sphere vanished against the pale sand, so the bubbles use a
-// "soap bubble" shader instead — almost clear in the middle, a soft blue-grey rim that
-// reads on the light background, and a bright white highlight spot.
+// Look (like real air bubbles in water): almost clear in the middle, a thin bright
+// inner ring, a slightly darker blue-grey outer edge (what makes a real bubble read on a
+// light background), one crisp highlight and a faint second glint on the far side.
+// Each bubble fades in / out with its own alpha instead of popping in by scale.
+// Motion: they leave in little clusters, most are tiny and a few are bigger; they start
+// slow, speed up as they rise (bigger ones rise faster), zig-zag a little and the big
+// ones squash slightly and wobble.
 const BUB = 160;
 const bubbleMat = new THREE.ShaderMaterial({
   transparent: true, depthWrite: false,
-  uniforms: { uRim: { value: new THREE.Color(0x3a7fae) }, uOpacity: { value: 1 } },
+  uniforms: { uEdge: { value: new THREE.Color(0x5d8299) }, uOpacity: { value: 1 } },
   vertexShader: `
-    varying vec3 vN; varying vec3 vV;
+    attribute float aFade;
+    varying vec3 vN; varying vec3 vV; varying float vFade;
     void main() {
       vec4 mv = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
       vN = normalize(normalMatrix * mat3(instanceMatrix) * normal);
       vV = normalize(-mv.xyz);
+      vFade = aFade;
       gl_Position = projectionMatrix * mv;
     }`,
   fragmentShader: `
-    uniform vec3 uRim; uniform float uOpacity;
-    varying vec3 vN; varying vec3 vV;
+    uniform vec3 uEdge; uniform float uOpacity;
+    varying vec3 vN; varying vec3 vV; varying float vFade;
     void main() {
       vec3 n = normalize(vN);
-      float f = 1.0 - clamp(dot(n, normalize(vV)), 0.0, 1.0);
-      float rim = smoothstep(0.2, 0.85, f);                        // edge ring
-      float hl = smoothstep(0.86, 0.96, dot(n, normalize(vec3(-0.45, 0.6, 0.66))));   // highlight
-      vec3 col = mix(vec3(0.85, 0.95, 1.0), uRim, rim);
-      col = mix(col, vec3(1.0), hl);
-      float a = (0.22 + 0.78 * rim + 0.9 * hl) * uOpacity;
-      gl_FragColor = vec4(col, clamp(a, 0.0, 1.0));
+      float f = 1.0 - clamp(dot(n, normalize(vV)), 0.0, 1.0);    // 0 centre → 1 edge
+      float inner = smoothstep(0.45, 0.75, f) * (1.0 - smoothstep(0.8, 0.92, f));  // bright ring
+      float edge = smoothstep(0.82, 0.97, f);                    // darker outline
+      float hl = smoothstep(0.935, 0.975, dot(n, normalize(vec3(-0.42, 0.62, 0.66))));
+      float hl2 = smoothstep(0.955, 0.985, dot(n, normalize(vec3(0.5, -0.45, 0.74)))) * 0.45;
+      vec3 col = vec3(1.0);
+      col = mix(col, uEdge, edge);
+      float a = 0.08 + 0.42 * inner + 0.8 * edge + hl + hl2;
+      gl_FragColor = vec4(col, clamp(a, 0.0, 1.0) * vFade * uOpacity);
     }`,
 });
-const bubbles = new THREE.InstancedMesh(new THREE.SphereGeometry(0.012, 16, 12), bubbleMat, BUB);
+const bubbles = new THREE.InstancedMesh(new THREE.SphereGeometry(0.012, 20, 14), bubbleMat, BUB);
 bubbles.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+const bubFade = new THREE.InstancedBufferAttribute(new Float32Array(BUB), 1).setUsage(THREE.DynamicDrawUsage);
+bubbles.geometry.setAttribute('aFade', bubFade);
 bubbles.frustumCulled = false;
 scene.add(bubbles);
-const bub = Array.from({ length: BUB }, () => ({ life: 0, p: new THREE.Vector3(), v: new THREE.Vector3(), s: 1 }));
+const bub = Array.from({ length: BUB }, () => ({ life: 0, life0: 1, delay: 0, p: new THREE.Vector3(), v: new THREE.Vector3(), s: 1, z: 0, w: 0, wf: 8 }));
 let bubI = 0, bubAcc = 0;
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _p = new THREE.Vector3();
+function spawnBubble(origin, delay) {
+  const b = bub[bubI++ % BUB];
+  // size: mostly tiny, now and then a bigger one (z = 0 tiny … 1 biggest)
+  b.z = Math.pow(Math.random(), 2.2);
+  b.s = (0.45 + 1.55 * b.z) * P.bubbleSize;
+  b.life = b.life0 = rand(1.3, 2.3); b.delay = delay;
+  b.p.set(origin.x + rand(-0.012, 0.012), origin.y + rand(-0.01, 0.01), origin.z + rand(-0.012, 0.012));
+  // pushed back by the swimming fish, then left behind; starts rising slowly
+  b.v.set(-Math.sin(S.heading) * rand(0.06, 0.14) + rand(-0.03, 0.03), rand(0.03, 0.08), -Math.cos(S.heading) * rand(0.06, 0.14) + rand(-0.03, 0.03));
+  b.w = rand(0, 6.3); b.wf = THREE.MathUtils.lerp(9, 5, b.z);   // small ones jitter faster
+}
 function bubbleStep(dt) {
   bubAcc += dt * (0.35 + 2.5 * P.bubbleRate * S.swim * S.scale + (P.dashFx ? 22 * S.dashAmt : 0));
   while (bubAcc > 1) {
     bubAcc -= 1;
-    const pec = pecs[bubI & 1];
-    pec.getWorldPosition(_p);
-    const b = bub[bubI++ % BUB];
-    b.life = b.life0 = rand(1.0, 1.8); b.p.copy(_p); b.s = rand(0.6, 1.3) * P.bubbleSize;
-    b.w = rand(0, 6.3);                                      // wobble phase
-    b.v.set(-Math.sin(S.heading) * 0.12 + rand(-0.05, 0.05), rand(0.2, 0.4), -Math.cos(S.heading) * 0.12 + rand(-0.05, 0.05));
+    // a little cluster of 1–3 from alternating fins, released a few frames apart
+    pecs[bubI & 1].getWorldPosition(_p);
+    const n = Math.random() < 0.45 ? 1 : Math.random() < 0.7 ? 2 : 3;
+    for (let j = 0; j < n; j++) spawnBubble(_p, j * rand(0.04, 0.09));
   }
-  bub.forEach((b, i) => {
+  const fade = bubFade.array;
+  for (let i = 0; i < BUB; i++) {
+    const b = bub[i];
+    if (b.delay > 0) { b.delay -= dt; fade[i] = 0; _s.setScalar(0); bubbles.setMatrixAt(i, _m.compose(b.p, _q, _s)); continue; }
     if (b.life > 0) {
-      b.life -= dt; b.p.addScaledVector(b.v, dt); b.v.x *= 0.97; b.v.z *= 0.97;
-      b.w += dt * 9; b.p.x += Math.sin(b.w) * 0.02 * dt; b.p.z += Math.cos(b.w * 0.8) * 0.02 * dt;   // zig-zag rise
+      b.life -= dt;
+      // buoyancy: accelerate towards a terminal rise speed (bigger bubbles rise faster)
+      const term = 0.18 + 0.22 * b.z;
+      b.v.y += (term - b.v.y) * (1 - Math.exp(-dt * 1.8));
+      const drag = Math.exp(-dt * 2.2); b.v.x *= drag; b.v.z *= drag;
+      b.p.addScaledVector(b.v, dt);
+      // zig-zag: small sideways sway, gentler for the big ones
+      b.w += dt * b.wf;
+      const amp = (0.03 - 0.015 * b.z) * dt;
+      b.p.x += Math.sin(b.w) * amp; b.p.z += Math.cos(b.w * 0.83 + 1.1) * amp;
     }
-    // pop in quickly, grow a little as it rises, shrink away at the end
-    const age = b.life > 0 ? 1 - b.life / b.life0 : 1;
-    _s.setScalar(b.life > 0 ? b.s * Math.min(1, age * 12) * (1 + 0.35 * age) * Math.min(1, b.life * 3) : 0);
+    const alive = b.life > 0, age = alive ? 1 - b.life / b.life0 : 1;
+    fade[i] = alive ? smooth(0, 0.08, age) * (1 - smooth(0.7, 1, age)) : 0;
+    // grows slightly as it rises (less pressure); big ones are squashed and wobble
+    const g = b.s * (1 + 0.25 * age) * (alive ? 1 : 0);
+    const squash = 1 - 0.14 * b.z, wob = 0.05 * b.z * Math.sin(b.w * 1.7);
+    _s.set(g * (1 + wob), g * squash * (1 - wob), g * (1 + wob));
     bubbles.setMatrixAt(i, _m.compose(b.p, _q, _s));
-  });
+  }
   bubbles.instanceMatrix.needsUpdate = true;
+  bubFade.needsUpdate = true;
+}
+
+// =============================================================================
+// Fin trails: soft ribbons streaming from the two tail-fin lobe tips and the two
+// pectoral fin tips while swimming. Each emitter keeps a short history of world
+// positions (≤ trailLife s); the ribbon faces the camera, tapers to nothing and fades
+// out towards its end. Strength follows swim speed, so a hovering fish leaves none.
+// =============================================================================
+const TR_H = 40;                                   // history samples kept per emitter
+const TR_SUB = 3;                                  // Catmull-Rom points per history segment
+const TR_N = (TR_H - 1) * TR_SUB + 1;              // rendered points per emitter
+const TRAIL_EMIT = 4;                              // tail top, tail bottom, pec L, pec R
+const finTrGeo = new THREE.BufferGeometry();
+const trPos = new Float32Array(TRAIL_EMIT * TR_N * 2 * 3), trA = new Float32Array(TRAIL_EMIT * TR_N * 2);
+const trSide = new Float32Array(TRAIL_EMIT * TR_N * 2);
+for (let i = 0; i < trSide.length; i++) trSide[i] = i & 1 ? -1 : 1;
+finTrGeo.setAttribute('position', new THREE.BufferAttribute(trPos, 3).setUsage(THREE.DynamicDrawUsage));
+finTrGeo.setAttribute('alpha', new THREE.BufferAttribute(trA, 1).setUsage(THREE.DynamicDrawUsage));
+finTrGeo.setAttribute('side', new THREE.BufferAttribute(trSide, 1));
+{
+  const idx = [];
+  for (let e = 0; e < TRAIL_EMIT; e++) for (let i = 0; i < TR_N - 1; i++) {
+    const a = (e * TR_N + i) * 2, b = a + 2;
+    idx.push(a, a + 1, b, a + 1, b + 1, b);
+  }
+  finTrGeo.setIndex(idx);
+}
+// pure white ribbon with feathered edges: alpha falls off smoothly across the width,
+// so it reads as a soft wisp of water rather than a flat strip
+const finTrMat = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  uniforms: { uColor: { value: new THREE.Color(0xffffff) } },
+  vertexShader: `attribute float alpha; attribute float side; varying float vA; varying float vS;
+    void main(){ vA = alpha; vS = side; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `uniform vec3 uColor; varying float vA; varying float vS;
+    void main(){
+      float x = abs(vS);
+      float a = vA * pow(1.0 - x * x, 1.6);             // feathered edges, bright core
+      if (a <= 0.003) discard;
+      gl_FragColor = vec4(uColor, a);
+    }`,
+});
+const finTrMesh = new THREE.Mesh(finTrGeo, finTrMat);
+finTrMesh.frustumCulled = false; finTrMesh.renderOrder = 2;
+scene.add(finTrMesh);
+const finTrails = Array.from({ length: TRAIL_EMIT }, () => []);   // [{ p: Vector3, age, k }]
+const _tv = new THREE.Vector3(), _tt = new THREE.Vector3(), _ts = new THREE.Vector3(), _tc = new THREE.Vector3();
+const TAIL_TIP_T = 0.945, TAIL_TIP_Y = 0.4 * L * 0.9;          // tail-fin lobe tips (see buildFins)
+function finTip(e, out) {
+  if (e < 2) {                                                 // tail lobes ride on the spine
+    const sp = spineAt(TAIL_TIP_T);
+    return tilt.localToWorld(out.set(sp.x, (e === 0 ? 1 : -1) * TAIL_TIP_Y * 0.92, sp.z));
+  }
+  const m = pecs[e - 2].children[0];                           // pectoral fin tip (scale.x = ±1)
+  return m.localToWorld(out.set(0.25 * L, 0, 0));
+}
+// smoothed points (Catmull-Rom through the history) — reused, no per-frame allocation
+const trPts = Array.from({ length: TR_N }, () => ({ x: 0, y: 0, z: 0, age: 0, k: 0 }));
+const cr = (p0, p1, p2, p3, t) => {
+  const t2 = t * t, t3 = t2 * t;
+  return 0.5 * (2 * p1 + (p2 - p0) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (3 * p1 - p0 - 3 * p2 + p3) * t3);
+};
+function finTrailStep(dt) {
+  fish.updateMatrixWorld(true);
+  // strength: swimming speed (animator param) + a boost on the dash
+  const sp = clamp01(S.swim) * clamp01((S.animSpeed ?? 0) / Math.max(P.cruiseSpeed, 0.01));
+  const k = P.finTrail ? Math.min(1, sp * 0.9 + 0.6 * S.dashAmt) : 0;
+  const life = Math.max(P.trailLife, 0.05);
+  camera.getWorldPosition(_tc);
+  for (let e = 0; e < TRAIL_EMIT; e++) {
+    const h = finTrails[e];
+    for (const q of h) q.age += dt;
+    while (h.length && h[h.length - 1].age > life) h.pop();
+    // pectoral wisps are much fainter and thinner than the tail ones
+    h.unshift({ p: finTip(e, new THREE.Vector3()), age: 0, k: k * (e < 2 ? 1 : 0.45) });
+    if (h.length > TR_H) h.length = TR_H;
+    // resample the history into a smooth curve
+    let n = 0;
+    if (h.length >= 2) {
+      for (let j = 0; j < h.length - 1; j++) {
+        const p0 = h[Math.max(0, j - 1)], p1 = h[j], p2 = h[j + 1], p3 = h[Math.min(h.length - 1, j + 2)];
+        for (let s = 0; s < TR_SUB; s++) {
+          const t = s / TR_SUB, o = trPts[n++];
+          o.x = cr(p0.p.x, p1.p.x, p2.p.x, p3.p.x, t); o.y = cr(p0.p.y, p1.p.y, p2.p.y, p3.p.y, t); o.z = cr(p0.p.z, p1.p.z, p2.p.z, p3.p.z, t);
+          o.age = p1.age + (p2.age - p1.age) * t; o.k = p1.k + (p2.k - p1.k) * t;
+        }
+      }
+      const last = h[h.length - 1], o = trPts[n++];
+      o.x = last.p.x; o.y = last.p.y; o.z = last.p.z; o.age = last.age; o.k = last.k;
+    }
+    const wBase = P.trailWidth * (e < 2 ? 1 : 0.55) * 0.5;
+    for (let i = 0; i < TR_N; i++) {
+      const v = (e * TR_N + i) * 2;
+      if (i >= n) {                                            // unused: collapse, invisible
+        const q = n ? trPts[n - 1] : { x: 0, y: -10, z: 0 };
+        trPos[v * 3] = trPos[v * 3 + 3] = q.x; trPos[v * 3 + 1] = trPos[v * 3 + 4] = q.y; trPos[v * 3 + 2] = trPos[v * 3 + 5] = q.z;
+        trA[v] = trA[v + 1] = 0; continue;
+      }
+      const q = trPts[i], a = trPts[Math.max(0, i - 1)], b = trPts[Math.min(n - 1, i + 1)];
+      // tangent along the ribbon, side = tangent × view direction (camera-facing)
+      _tt.set(a.x - b.x, a.y - b.y, a.z - b.z); if (_tt.lengthSq() < 1e-12) _tt.set(0, 0, 1);
+      _tv.set(_tc.x - q.x, _tc.y - q.y, _tc.z - q.z);
+      _ts.crossVectors(_tt, _tv).normalize();
+      // shape along the length: grows out of the fin, widest early, thins to a fine point
+      const u = clamp01(q.age / life);
+      const shape = smooth(0, 0.08, u) * Math.pow(1 - u, 1.4);
+      const w = wBase * (0.25 + 0.75 * shape);
+      trPos[v * 3] = q.x + _ts.x * w; trPos[v * 3 + 1] = q.y + _ts.y * w; trPos[v * 3 + 2] = q.z + _ts.z * w;
+      trPos[v * 3 + 3] = q.x - _ts.x * w; trPos[v * 3 + 4] = q.y - _ts.y * w; trPos[v * 3 + 5] = q.z - _ts.z * w;
+      trA[v] = trA[v + 1] = P.trailOpacity * q.k * shape;
+    }
+  }
+  finTrGeo.attributes.position.needsUpdate = true;
+  finTrGeo.attributes.alpha.needsUpdate = true;
 }
 
 // =============================================================================
@@ -1443,6 +1618,14 @@ gs.add(P, 'bankPerTurnRate', 0, 0.2, 0.005).name('BankPerTurnRate');
 gs.add(P, 'bankSmooth', 0.01, 1, 0.01).name('BankSmoothSeconds');
 gs.add(P, 'idleSway', 0, 10, 0.1).name('IdleSwayDegrees');
 gs.add(P, 'rise').name('Rise');
+const gband = gui.addFolder('Swim band & hover');
+gband.add(P, 'band').name('up/down band');
+gband.add(P, 'bandHeight', 0, 0.8, 0.01).name('band height m');
+gband.add(P, 'bandPeriod', 1, 12, 0.1).name('band cycle s');
+gband.add(P, 'driftAmp', 0, 0.15, 0.005).name('hover drift m');
+gband.add(P, 'driftPeriod', 1, 8, 0.1).name('hover drift cycle s');
+gband.add(P, 'idleRoll', 0, 12, 0.5).name('hover roll °');
+gband.add(P, 'idlePitch', 0, 10, 0.5).name('hover pitch °');
 gui.add(P, 'joyRadius', 30, 160, 1).name('joystick radius px');
 const gd = gui.addFolder('Dash (lao)');
 gd.add(P, 'dashDist', 1, 6, 0.1).name('distance (body lengths)');
@@ -1454,6 +1637,11 @@ gd.add(P, 'dashSteer', 0, 720, 10).name('steer while dashing °/s');
 gd.add(P, 'dashFx').name('dash effects');
 gd.add(P, 'dashFov', 0, 15, 0.5).name('camera kick °');
 gui.add(P, 'pillars').name('rock pillars (test map)').onChange(applyMap);
+const gtr = gui.addFolder('Fin trails');
+gtr.add(P, 'finTrail').name('fin trails');
+gtr.add(P, 'trailLife', 0.1, 1.0, 0.01).name('trail length s');
+gtr.add(P, 'trailWidth', 0.004, 0.05, 0.001).name('trail width m');
+gtr.add(P, 'trailOpacity', 0, 1, 0.01).name('trail opacity');
 const gb = gui.addFolder('Bubbles');
 gb.add(P, 'bubbleSize', 0.5, 3, 0.05).name('bubble size');
 gb.add(P, 'bubbleRate', 0, 4, 0.1).name('bubbles while swimming');
@@ -1547,13 +1735,14 @@ renderer.setAnimationLoop((now) => {
   fxStep(dt);
   updateDashUI();
   updateCamera(dt, false);
+  finTrailStep(dt);
   renderer.render(scene, camera);
 });
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
-window.__demo = { P, S, camera, uni, boneAng, solveSpine, step, renderer, scene, updateCamera, fish, tilt, time, OBST, climbHeightAt, fxStep, bubbleStep, applyMap, frameDt, pace, quality };
+window.__demo = { P, S, camera, uni, boneAng, solveSpine, step, renderer, scene, updateCamera, fish, tilt, time, OBST, climbHeightAt, fxStep, bubbleStep, finTrailStep, applyMap, frameDt, pace, quality };
 </script>
 </body>
 </html>
