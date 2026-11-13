@@ -1014,11 +1014,13 @@ function buildGoldPainted() {
     let lo = uB - 1, hi = uB - 1e-4;
     for (let i = 0; i < 60; i++) { const c = (lo + hi) / 2, d = uB - c, L = uTipD - c, v = d / (L * L - d * d); if (v > k) hi = c; else lo = c; }
     const c = (lo + hi) / 2, L = uTipD - c, d0 = uB - c, n0 = Math.sqrt(1 - d0 * d0 / (L * L));
-    return u => u <= uB ? 1 : Math.sqrt(Math.max(0, 1 - ((u - c) / L) ** 2)) / n0;
+    const fn = u => u <= uB ? 1 : Math.sqrt(Math.max(0, 1 - ((u - c) / L) ** 2)) / n0;
+    fn.sq = u => u <= uB ? 1 : (1 - ((u - c) / L) ** 2) / (n0 * n0);   // bình phương, không cắt: âm dần phía trước chóp
+    return fn;
   })();
   const HD = buildSnout(true), RAD2 = 96, DOME = 40;
-  const ringXY = (u, sY = 1, sZ = 1, dx = 0) => {
-    const [vt, vb] = at(u), yT = (.5 - vt) * H, yB = (.5 - vb) * H, cy = (yT + yB) / 2, hh = Math.max(.004, (yT - yB) / 2);
+  const ringXY = (u, sY = 1, sZ = 1, dx = 0, yC = null) => {
+    const [vt, vb] = at(u), yT = (.5 - vt) * H, yB = (.5 - vb) * H, cy = yC ?? (yT + yB) / 2, hh = Math.max(.004, (yT - yB) / 2);
     const hw = Math.max(Math.min(hh * widthK(u), u > uA ? wA * 1.05 : 9), snoutW(u)), ex = lerp(.85, .62, lipK(u));
     for (let j = 0; j <= RAD2; j++) {
       const a = -Math.PI / 2 + j / RAD2 * TAU, s = Math.sin(a), c = Math.cos(a);
@@ -1027,24 +1029,28 @@ function buildGoldPainted() {
     }
   };
   const nBody = 84; for (let i = 0; i <= nBody; i++) ringXY(lerp(u0, uB, i / nBody));
+  // Tâm lưới (chóp, nơi mọi đường lưới hội tụ) đặt ngay khe miệng: các vòng lưới chạy vòng quanh môi thay vì
+  // cắt ngang khe miệng, và điểm hội tụ nằm khuất trong lòng miệng (trước đây nằm giữa môi trên → lỗ thủng, vệt)
+  const Y_MOUTH = -.026 + (uTipD - .5 - .471) * Math.tan(.38), cyB = (() => { const [vt, vb] = at(uB); return ((.5 - vt) * H + (.5 - vb) * H) / 2; })();
   for (let k = 1; k < DOME; k++) {                             // vòm mũi: cùng công thức với SDF (q = 1 − t²·sm(0,.6,t))
     const t = Math.sin(k / DOME * Math.PI / 2), u = lerp(uB, uTipD, t), f = Math.max(.01, fDome(u));
-    ringXY(uB, f, f, u - uB);
+    ringXY(uB, f, f, u - uB, lerp(cyB, Y_MOUTH, sm(.15, 1, 1 - f)));   // tâm vòm trôi dần về khe miệng
   }
   const N = nBody + DOME;                                      // số vòng
   for (let i = 0; i < N - 1; i++) for (let j = 0; j < RAD2; j++) { const a = i * (RAD2 + 1) + j, b = a + RAD2 + 1; idx.push(a, a + 1, b, b, a + 1, b + 1); }
   { const [vt, vb] = at(u0), cy = ((.5 - vt) * H + (.5 - vb) * H) / 2, ci = pos.length / 3;   // nắp đuôi
     pos.push(u0 - .5 - .006, cy, 0); uv.push(u0, 1 - (vt + vb) / 2); for (let j = 0; j < RAD2; j++) idx.push(j, j + 1, ci); }
   { const [vt, vb] = at(uB), cy = ((.5 - vt) * H + (.5 - vb) * H) / 2, ci = pos.length / 3, base = (N - 1) * (RAD2 + 1);   // chóp mũi
-    pos.push(uTipD - .5, cy, 0); uv.push(uB, 1 - (vt + vb) / 2); for (let j = 0; j < RAD2; j++) idx.push(base + j, ci, base + j + 1); }
-  // bắn tia vùng mõm tới bề mặt SDF
-  const nV = pos.length / 3, eg = .0006;
+    pos.push(uTipD - .5, Y_MOUTH, 0); uv.push(uB, 1 - (vt + vb) / 2); for (let j = 0; j < RAD2; j++) idx.push(base + j, base + j + 1, ci); }   // cùng chiều quấn với phần còn lại
+  // bắn tia vùng mõm tới bề mặt SDF: tia toả ra từ một điểm trong đầu nằm trên mặt phẳng khe miệng,
+  // nên các tia gần tâm lưới đi thẳng vào khe miệng và điểm hội tụ nằm khuất trong lòng miệng
+  const nV = pos.length / 3, eg = .0006, SLT = Math.tan(.38), CPX = .38, CPY = -.026 + (CPX - .471) * SLT;
   const LIP = new Float32Array(nV * 4), AO = new Float32Array(nV).fill(1), OPEN = new Float32Array(nV * 3), CLOSE = new Float32Array(nV * 3);
   const gF = (x, y, z, f) => { const a = [(f(x + eg, y, z) - f(x - eg, y, z)), (f(x, y + eg, z) - f(x, y - eg, z)), (f(x, y, z + eg) - f(x, y, z - eg))], l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
   for (let v = 0; v < nV; v++) {
     let x = pos[v * 3], y = pos[v * 3 + 1], z = pos[v * 3 + 2];
     if (x < HD.XB - .002) continue;
-    const n = gF(x, y, z, HD.faceD);
+    const n = (() => { const a = [x - CPX, y - CPY, z], l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; })();
     let t = .07, st = .0012, prev = HD.shape(x + n[0] * t, y + n[1] * t, z + n[2] * t);
     while (t > -.03) { const tn = t - st, d = HD.shape(x + n[0] * tn, y + n[1] * tn, z + n[2] * tn); if (d < 0) { let lo = tn, hi = t;
         for (let it = 0; it < 10; it++) { const m = (lo + hi) / 2; if (HD.shape(x + n[0] * m, y + n[1] * m, z + n[2] * m) < 0) lo = m; else hi = m; } t = (lo + hi) / 2; break; } t = tn; prev = d; }
@@ -1085,18 +1091,23 @@ function buildGoldPainted() {
     for (let i = 0; i < N; i++) { const a = i * (RAD2 + 1), b = a + RAD2; const nx = nA.getX(a) + nA.getX(b), ny = nA.getY(a) + nA.getY(b), nz = nA.getZ(a) + nA.getZ(b), l = Math.hypot(nx, ny, nz) || 1;
       nA.setXYZ(a, nx / l, ny / l, nz / l); nA.setXYZ(b, nx / l, ny / l, nz / l); } }
   { // vùng mõm: pháp tuyến lấy từ gradient SDF (mượt tuyệt đối, không lộ sọc của lưới)
-    const nA = bodyGeo.attributes.normal, P = bodyGeo.attributes.position;
+    // aNrmC: pháp tuyến lúc khép miệng — sát khe miệng đổ bóng như môi liền (thành khe đổi hướng gắt → sọc trên mép môi),
+    // khe chỉ thể hiện bằng màu; shader trộn dần sang pháp tuyến thật khi há miệng
+    const nA = bodyGeo.attributes.normal, P = bodyGeo.attributes.position, nC = new THREE.BufferAttribute(new Float32Array(nA.array), 3);
+    const put = (attr, v, g, w) => { const mx = lerp(nA.getX(v), -g[0], w), my = lerp(nA.getY(v), -g[1], w), mz = lerp(nA.getZ(v), -g[2], w), l = Math.hypot(mx, my, mz) || 1;   // lưới quấn ngược: pháp tuyến hướng vào
+      attr.setXYZ(v, mx / l, my / l, mz / l); };
     for (let v = 0; v < P.count; v++) { const x = P.getX(v), y = P.getY(v), z = P.getZ(v); if (x < HD.XB - .01) continue;
-      const g = gF(x, y, z, HD.shape), w = sm(HD.XB - .01, HD.XB + .01, x);
-      const mx = lerp(nA.getX(v), -g[0], w), my = lerp(nA.getY(v), -g[1], w), mz = lerp(nA.getZ(v), -g[2], w), l = Math.hypot(mx, my, mz) || 1;   // lưới quấn ngược: pháp tuyến hướng vào
-      nA.setXYZ(v, mx / l, my / l, mz / l); } }
+      const g0 = gF(x, y, z, HD.shape), g1 = gF(x, y, z, HD.closed), ws = sm(.008, .002, HD.cavD(x, y, z)), w = sm(HD.XB - .01, HD.XB + .01, x);
+      put(nC, v, [lerp(g0[0], g1[0], ws), lerp(g0[1], g1[1], ws), lerp(g0[2], g1[2], ws)], w); put(nA, v, g0, w); }
+    bodyGeo.setAttribute('aNrmC', nC); }
   const uMouth = { value: 0 };
   const bodyMat = patch(paintedMat('body', { side: THREE.BackSide }), { bend: U });   // lưới quấn ngược → mặt ngoài là BackSide; giấu các tam giác gấp ở mép môi
   { const prevC = bodyMat.onBeforeCompile;
     bodyMat.onBeforeCompile = sh => {
       prevC(sh); sh.uniforms.uMouth = uMouth;
       sh.vertexShader = sh.vertexShader
-        .replace('#include <common>', '#include <common>\nattribute vec4 aLip; attribute float aAO; attribute vec3 aOpen; attribute vec3 aClose; uniform float uMouth; varying vec4 vLip; varying float vAO;')
+        .replace('#include <common>', '#include <common>\nattribute vec4 aLip; attribute float aAO; attribute vec3 aOpen; attribute vec3 aClose; attribute vec3 aNrmC; uniform float uMouth; varying vec4 vLip; varying float vAO;')
+        .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\nobjectNormal = normalize(mix(aNrmC, objectNormal, uMouth));')
         .replace('#include <morphtarget_vertex>', '#include <morphtarget_vertex>\ntransformed += aOpen * uMouth + aClose * (1.0 - uMouth); vLip = aLip; vAO = aAO;');
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <common>', '#include <common>\nvarying vec4 vLip; varying float vAO;')
@@ -1128,10 +1139,10 @@ function buildGoldPainted() {
     const lut = (u, o) => { const f = clamp((u - LU0) / (uD - LU0), 0, 1) * LN, i = Math.min(LN - 1, f | 0), k = f - i;
       for (let c = 0; c < 4; c++) o[c] = LUT[i * 4 + c] * (1 - k) + LUT[i * 4 + 4 + c] * k; return o; };
     const P0 = new Float32Array(4), P1 = new Float32Array(4), P2 = new Float32Array(4), EX = .0012;
-    const faceF = (u, y, z, P) => { const dy = (y - P[0]) / P[1], dz = Math.abs(z) / P[2]; let F = dy * dy + Math.pow(dz, 2 / P[3]) - 1; if (u > uD) { const f = Math.max(.02, fDome(u)); F = (F + 1) / (f * f) - 1; if (u > uTipD) F += ((u - uTipD) / .01) ** 2; } return F; };   // vòm bắt đầu cong dần, không gãy
+    const faceF = (u, y, z, P) => { const dy = (y - P[0]) / P[1], dz = Math.abs(z) / P[2]; let F = dy * dy + Math.pow(dz, 2 / P[3]) - 1; if (u > uD) F += 1 - fDome.sq(u); return F; };   // vòm: cùng mặt với F/f² nhưng mượt cả qua chóp (trước đây bị cắt cụt ở uTipD → vệt ở khoé/nếp môi)
     const faceD = (x, y, z) => {
       const u = x + .5; lut(Math.min(u, uD), P0); const F = faceF(u, y, z, P0);
-      if (F > 6) return .06;
+      if (F > 400) return .08;                                 // xa hẳn mặt: trị ước lượng ở đây đã > .08 nên không tạo bậc
       lut(Math.min(u + EX, uD), P1); lut(Math.min(u - EX, uD), P2);
       const gx = (faceF(u + EX, y, z, P1) - faceF(u - EX, y, z, P2)) / (2 * EX);
       const dy = (y - P0[0]) / P0[1], dz = Math.abs(z) / P0[2], e2 = 2 / P0[3];
@@ -1145,7 +1156,7 @@ function buildGoldPainted() {
     const LIPL = [[0.469, -.047, 0, .025, .025, .04], [0.455, -.044, .03, .02, .021, .025]], KL = .016;
     const lipD = (x, y, z, S, k) => { const a = S[0], b = S[1]; return smin(sdE(x - a[0], y - a[1], z - a[2], a[3], a[4], a[5]), sdE(x - b[0], y - b[1], Math.abs(z) - b[2], b[3], b[4], b[5]), k); };
     const near = (x, y, z) => x > .405 && Math.abs(z) < .1 && y < .07 && y > -.1;
-    const lipsD = (x, y, z) => near(x, y, z) ? Math.min(lipD(x, y, z, LIPU, KU), lipD(x, y, z, LIPL, KL)) : .06;
+    const lipsD = (x, y, z) => Math.min(lipD(x, y, z, LIPU, KU), lipD(x, y, z, LIPL, KL));   // tính ở mọi nơi: cắt theo hộp "near" làm mặt bị gãy (vệt sáng/tối quanh môi)
     const CAV = [0.471, -.026, .05, .0058, .05], cth = Math.cos(.38), sth = Math.sin(.38);   // khe dựng hở ~1.1mm cho lưới sạch; lúc khép, môi được ép sát lại
     const cavD = (x, y, z) => { const dx = x - CAV[0], dy = y - CAV[1]; return sdE(dx * cth + dy * sth, -dx * sth + dy * cth, z, CAV[2], CAV[3], CAV[4]); };
     const KF = .05, KC = .003;
@@ -1153,23 +1164,22 @@ function buildGoldPainted() {
     const off = x => .003 * (1 - sm(XB - .016, XB, x));       // phần chồng lên thân: lùi vào trong để thân che
     const SDF = (x, y, z) => shape(x, y, z) + off(x);
     if (exportOnly) {
-      const cU = new THREE.Color('#f6b09a'), cL = new THREE.Color('#f2a088'), cHi = new THREE.Color('#fcd3bf'), cCav0 = new THREE.Color('#e48a62'), cCav1 = new THREE.Color('#8a3216'), FACEC = new THREE.Color('#fdcc8a'), tc = new THREE.Color(), tk = new THREE.Color(), e = .0006;
+      const cU = new THREE.Color('#f6b09a'), cL = new THREE.Color('#f2a088'), cHi = new THREE.Color('#fcd3bf'), cCav0 = new THREE.Color('#dd8064'), cCav1 = new THREE.Color('#a0442a'), FACEC = new THREE.Color('#fdcc8a'), tc = new THREE.Color(), tk = new THREE.Color(), e = .0006;
       const attrs = (x, y, z) => {
         const g = [shape(x + e, y, z) - shape(x - e, y, z), shape(x, y + e, z) - shape(x, y - e, z), shape(x, y, z + e) - shape(x, y, z - e)], gl = Math.hypot(g[0], g[1], g[2]) || 1, nX = g[0] / gl, nY = g[1] / gl, nZ = g[2] / gl;
-        const fd = faceD(x, y, z), nr = near(x, y, z), dU = nr ? lipD(x, y, z, LIPU, KU) : .06, dL = nr ? lipD(x, y, z, LIPL, KL) : .06, cd = nr ? cavD(x, y, z) : .06;
-        const wLip = sm(.001, .014, fd), wUp = sm(-.005, .005, dL - dU), wCav = sm(.009, .001, cd);
+        const fd = faceD(x, y, z), nr = near(x, y, z), dU = lipD(x, y, z, LIPU, KU), dL = lipD(x, y, z, LIPL, KL), cd = nr ? cavD(x, y, z) : .06;
+        const wLip = sm(-.002, .022, fd), wUp = sm(-.005, .005, dL - dU), wCav = sm(.004, 0, cd) * sm(.5, .484, x);   // chỉ tô tối phần sâu trong khe: mép môi giữ màu môi nên khe khép là một đường mảnh, gọn
         tc.copy(cL).lerp(cU, wUp).lerp(cHi, wUp * sm(.15, .85, nY) * .75);
-        tk.copy(cCav0).lerp(cCav1, clamp((.498 - x) / .04, 0, 1)); tc.lerp(tk, wCav);
-        let occ = 0; for (let st = 1; st <= 5; st++) { const dd = st * .004; occ += (dd - shape(x + nX * dd, y + nY * dd, z + nZ * dd)) * Math.pow(.6, st); }
+        tk.copy(cCav0).lerp(cCav1, sm(.492, .462, x)); tc.lerp(tk, wCav);
         const dx = x - CAV[0], dy = y - CAV[1], qy = -dx * sth + dy * cth;
         const wz = Math.max(0, 1 - (z / .08) ** 2), wx = sm(.428, .45, x), wy = Math.exp(-((qy / .085) ** 2)), sg = sm(-.003, .003, qy) * 2 - 1, w = wz * wx * wy;
         const wc = Math.max(0, 1 - (z / .066) ** 2) * sm(.433, .463, x) * Math.exp(-((qy / .016) ** 2));
         const wF = sm(XB, XB + .025, x), aL = Math.max(wLip, wCav);   // mõm: da màu đều (tranh vùng này có vệt), môi phủ lên
         tk.copy(FACEC).lerp(tc, aL);
-        return { lip: [tk.r, tk.g, tk.b, Math.max(wF, aL)], ao: clamp(1 - 12 * occ, .8, 1),
+        return { lip: [tk.r, tk.g, tk.b, Math.max(wF, aL)], ao: 1,   // không tự đổ bóng lên cá (bỏ che khuất nướng sẵn)
           open: [.016 * w * Math.abs(sg), sg * .022 * w, -z * .5 * w * Math.abs(sg)], close: [0, -sg * .0052 * wc, 0] };
       };
-      return { shape, faceD, attrs, XB, Ld };
+      return { shape, faceD, attrs, XB, Ld, closed: (x, y, z) => smin(faceD(x, y, z), lipsD(x, y, z), KF), cavD };
     }
     // ---- surface nets ----
     const h = .0024, X0 = XB - .02, X1 = .52, Y0 = -.17, Y1 = .17, Z0 = -.12, Z1 = .12;
@@ -1207,7 +1217,7 @@ function buildGoldPainted() {
     const nV = vs.length / 3, POS = new Float32Array(vs), NRM = new Float32Array(nV * 3), UVA = new Float32Array(nV * 2),
       LIP = new Float32Array(nV * 4), AO = new Float32Array(nV), OPEN = new Float32Array(nV * 3), CLOSE = new Float32Array(nV * 3), eg = .0006;
     const grad = (x, y, z, f) => [(f(x + eg, y, z) - f(x - eg, y, z)) / (2 * eg), (f(x, y + eg, z) - f(x, y - eg, z)) / (2 * eg), (f(x, y, z + eg) - f(x, y, z - eg)) / (2 * eg)];
-    const cU = new THREE.Color('#f6b09a'), cL = new THREE.Color('#f2a088'), cHi = new THREE.Color('#fcd3bf'), cCav0 = new THREE.Color('#e48a62'), cCav1 = new THREE.Color('#8a3216'), tc = new THREE.Color(), tk = new THREE.Color();
+    const cU = new THREE.Color('#f6b09a'), cL = new THREE.Color('#f2a088'), cHi = new THREE.Color('#fcd3bf'), cCav0 = new THREE.Color('#dd8064'), cCav1 = new THREE.Color('#a0442a'), tc = new THREE.Color(), tk = new THREE.Color();
     for (let v = 0; v < nV; v++) {
       let x = POS[v * 3], y = POS[v * 3 + 1], z = POS[v * 3 + 2];
       for (let it = 0; it < 4; it++) { const d = SDF(x, y, z), g = grad(x, y, z, SDF), g2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2]; if (g2 < 1e-10) break;
@@ -1218,10 +1228,10 @@ function buildGoldPainted() {
       const u = x + .5, [vt, vb] = at(clamp(u, u0, u1)), yT = (.5 - vt) * H, yB = (.5 - vb) * H, s = clamp((y - (yT + yB) / 2) / Math.max(.004, (yT - yB) / 2), -1, 1);
       UVA[v * 2] = u; UVA[v * 2 + 1] = 1 - lerp(vt + inset, vb - inset, (1 - s) / 2);
       // màu môi / lòng miệng
-      const fd = faceD(x, y, z), nr = near(x, y, z), dU = nr ? lipD(x, y, z, LIPU, KU) : .06, dL = nr ? lipD(x, y, z, LIPL, KL) : .06, cd = nr ? cavD(x, y, z) : .06;
-      const wLip = sm(.001, .014, fd), wUp = sm(-.005, .005, dL - dU), wCav = sm(.009, .001, cd);
+      const fd = faceD(x, y, z), nr = near(x, y, z), dU = lipD(x, y, z, LIPU, KU), dL = lipD(x, y, z, LIPL, KL), cd = nr ? cavD(x, y, z) : .06;
+      const wLip = sm(-.002, .022, fd), wUp = sm(-.005, .005, dL - dU), wCav = sm(.004, 0, cd) * sm(.5, .484, x);   // chỉ tô tối phần sâu trong khe: mép môi giữ màu môi nên khe khép là một đường mảnh, gọn
       tc.copy(cL).lerp(cU, wUp).lerp(cHi, wUp * sm(.15, .85, nY) * .75);
-      tk.copy(cCav0).lerp(cCav1, clamp((.498 - x) / .04, 0, 1)); tc.lerp(tk, wCav);
+      tk.copy(cCav0).lerp(cCav1, sm(.492, .462, x)); tc.lerp(tk, wCav);
       LIP[v * 4] = tc.r; LIP[v * 4 + 1] = tc.g; LIP[v * 4 + 2] = tc.b; LIP[v * 4 + 3] = Math.max(wLip, wCav);
       // che khuất (AO) đo bằng SDF: nếp môi–mặt và lòng miệng tối dần
       let occ = 0; for (let st = 1; st <= 5; st++) { const dd = st * .004; occ += (dd - shape(x + nX * dd, y + nY * dd, z + nZ * dd)) * Math.pow(.6, st); }
