@@ -56,7 +56,8 @@ const P = {
   // dash / lunge (design doc "Lao đớp"): bursts ~3 body lengths straight ahead, eased out.
   // Costs one stamina charge; charges refill one at a time.
   // Speed rises smoothly to a peak at 1/3 of the dash and glides out (no instant jolt).
-  dashDist: 2.6, dashTime: 0.55, dashCharges: 3, dashRegen: 2.5, dashTailBoost: 1.6, dashBuffer: 0.15,
+  dashDist: 2.6, dashTime: 0.55, dashCharges: 3, dashRegen: 2.5, dashTailBoost: 2.6, dashBuffer: 0.15,
+  dashTailAmp: 0.25, beatRise: 0.05, beatFall: 0.18,   // lao: quẫy nhanh (×1+boost) và mạnh hơn; tăng trong 0.05 s, hết lao thì chậm lại ngay (~0.2 s)
   dashSteer: 260,          // °/s the stick can turn the fish while dashing
   stopSmooth: 0.35,        // s: glide to a stop instead of halting instantly
   pillars: false,          // test layout with tall rock pillars (false = original open map)
@@ -87,6 +88,8 @@ const P = {
   natCurl: 0, curlHz: 13, curlDamp: 0.6, curlLoose: 0.3,
   // game mode: turn bend only on the tail section (video: rigid front, tail lags & whips)
   turnTailBend: 1.2, turnBendStart: 0.38, stalkCurve: 0.45,
+  // đầu dẫn hướng khi rẽ: đầu ngoái trước sang hướng mới (độ cong so với thân), thân giữa cong nhẹ theo
+  headLead: 0.055, headLeadMax: 30, headLeadSmooth: 0.08, headLeadRelease: 0.3, frontBend: 0.6,
   // extra fold for U-turns (≈180°): gain grows as the tail trails the head by 70°→170°
   curlBigTurn: 0.7, curlMaxFold: 90,
   // fin follow-through (demo addition on top of the game's hinge, 0 = rigid like the raw formula)
@@ -101,6 +104,7 @@ const P = {
   // game value FlutterDegrees 1.5; the video shows clearly visible flapping, so the demo
   // uses a larger stroke on its (smaller) fins
   pecFlutter: 6, pecFlutterHz: 1.6,
+  squash: true, finLag: true,   // nhún giãn khi lao/phanh/thở; vây và đuôi quất theo trễ sau cú rẽ, cú phanh
   // rest angle back from straight out (°), and edge-on twist on the return stroke (°)
   pecRest: 25, pecFeather: 55,
   // bodyDegrees raised from 12 so the mid-body → tail stalk visibly curves, not just the fin
@@ -746,17 +750,23 @@ function solveSpine(dt) {
     // fin hinge) with a cosine ramp, so the stalk curves as an arc instead of kinking at
     // the hinge; stalkCurve adds extra curvature in the middle of the stalk.
     const ub = clamp01((t - P.turnBendStart) / Math.max(T_HINGE + 0.12 - P.turnBendStart, 0.05));
-    const bendW = (0.5 - 0.5 * Math.cos(Math.PI * ub)) * (1 + P.stalkCurve * Math.sin(Math.PI * ub));
+    const bendW = Math.max((0.5 - 0.5 * Math.cos(Math.PI * ub)) * (1 + P.stalkCurve * Math.sin(Math.PI * ub)),
+      P.frontBend * smooth(T_PIVOT, P.turnBendStart + 0.1, t));   // thân giữa cũng cong nhẹ, không cứng đơ
     return th + fin * hinge + finLag * tip + curlAt(t) * bendW;
   };
 
   const seg = L / K;
   // head: rigid, rotated by H about the pivot (Spine_0 = the fish's sim position)
+  // + đầu dẫn hướng: khi rẽ, đầu ngoái trước sang hướng mới (ngược dấu với đuôi đang trễ) → thân thành hình chữ C mềm
+  const leadTgt = THREE.MathUtils.clamp(-deg(P.headLead * S.curlRate), -deg(P.headLeadMax), deg(P.headLeadMax));   // curlRate tính bằng °/s
+  const hl0 = S.headLead ?? 0, grow = Math.abs(leadTgt) > Math.abs(hl0);   // ngoái nhanh, trả về chậm hơn để thấy rõ
+  S.headLead = hl0 + (leadTgt - hl0) * (1 - Math.exp(-dt / Math.max(grow ? P.headLeadSmooth : P.headLeadRelease, 0.01)));
+  const aHead = boneAng[0] + S.headLead;
   for (let i = 0; i <= K; i++) {
     const t = i / K;
     if (t > T_PIVOT) break;
     const d = (T_PIVOT - t) * L;
-    uni.uSpine.value[i].set(-Math.sin(boneAng[0]) * d, Math.cos(boneAng[0]) * d, boneAng[0]);
+    uni.uSpine.value[i].set(-Math.sin(aHead) * d, Math.cos(aHead) * d, aHead);
   }
   // body + tail from the pivot backwards
   const i0 = Math.ceil(T_PIVOT * K);
@@ -791,11 +801,11 @@ function attachParts(t, dt) {
     // FishFins.Pose on the goldfish fin (rests swept back, yaw · side > 0 opens it outwards):
     // SweepDegrees·fold folds it back against the body, plus a paddle stroke (right fin +90°)
     // and an edge-on twist (feather) on the return half of the stroke.
-    const d = p.userData, ph = S.flutter + (d.sx > 0 ? Math.PI / 2 : 0);
+    const d = p.userData, ph = S.flutter + (d.sx > 0 ? Math.PI : 0);   // hai vây ngực quạt so le (lệch nửa nhịp)
     const flutter = deg(P.pecFlutter) * Math.sin(ph);
     const feather = deg(P.pecFeather) * smooth(0, 1, Math.max(0, -Math.cos(ph)));
     const sweep = deg(P.pecSweep) * S.pecPose;
-    d.obj.rotation.y = d.side * (0.3 + deg(25 - P.pecRest) - sweep * 0.6 + flutter * 4);
+    d.obj.rotation.y = d.side * (0.3 + deg(25 - P.pecRest) - sweep * 0.6 + flutter * 4) + SQ.fin * 0.9;   // trễ theo cú rẽ
     d.obj.rotation.z = feather * 0.4 * d.side;
   }
   // mouth: slow idle breathing, opens wide on the dash lunge
@@ -921,8 +931,11 @@ function step(input, dt, t) {
   // ---- FishTailSway.Step(dt, moving, speed = animator param)
   const driveT = moving ? clamp01(S.animSpeed / Math.max(P.cruiseSpeed, 0.01)) : 0;
   S.drive += (driveT - S.drive) * (1 - Math.exp(-dt / Math.max(P.tailBlend, 0.01)));
-  S.scale = P.atRest + (1 - P.atRest) * clamp01(S.drive);
-  S.phase += 2 * Math.PI * dt * S.scale * (1 + P.dashTailBoost * S.dashAmt) / Math.max(P.tailSeconds, 0.05);
+  // quẫy đuôi khi lao: nhịp đuôi tăng vọt ngay khi lao, hết lao thì chậm dần từ từ về nhịp thường
+  const beatTgt = Math.pow(clamp01(S.dashAmt ?? 0), 1.6);   // hạ nhanh khi cú lao bắt đầu lướt chậm lại
+  S.beat = (S.beat ?? 0) + (beatTgt - (S.beat ?? 0)) * (1 - Math.exp(-dt / (beatTgt > (S.beat ?? 0) ? P.beatRise : P.beatFall)));
+  S.scale = (P.atRest + (1 - P.atRest) * clamp01(S.drive)) * (1 + P.dashTailAmp * S.beat);
+  S.phase += 2 * Math.PI * dt * S.scale * (1 + P.dashTailBoost * S.beat) / Math.max(P.tailSeconds, 0.05);
   if (S.phase > 2 * Math.PI) S.phase -= 2 * Math.PI;
 
   // ---- FishSwimMotion.LateUpdate: swim blend, wag & idle phases
@@ -1009,7 +1022,7 @@ function step(input, dt, t) {
   tilt.rotation.set(-deg(S.pitch), deg(sway), -deg(S.bank));
 
   uni.uPhase.value = S.phase;
-  uni.uFlutter.value = 0.004 + 0.006 * S.scale;
+  uni.uFlutter.value = 0.004 + 0.006 * S.scale + 0.03 * Math.abs(SQ.fin);   // vây/đuôi quất theo sau cú rẽ, cú phanh
   solveSpine(dt);
   attachParts(t, dt);
 }
@@ -1159,12 +1172,9 @@ const _tv = new THREE.Vector3(), _tt = new THREE.Vector3(), _ts = new THREE.Vect
 // tail-fin lobe tips: upper lobe (fins[0]) and lower lobe (fins[1]) of the goldfish tail
 const TAIL_TIP_T = alongOf(GF_BOX.min.x + 0.04 * GF_LEN), TAIL_TIP_Y = [gfBox(GP.fins[0]).max.y * GS * 0.9, gfBox(GP.fins[1]).min.y * GS * 0.9];
 function finTip(e, out) {
-  if (e < 2) {                                                 // tail lobes ride on the spine
-    const sp = spineAt(TAIL_TIP_T);
-    return tilt.localToWorld(out.set(sp.x, TAIL_TIP_Y[e], sp.z));
-  }
-  const m = pecs[e - 2].userData.obj.children[0];              // pectoral fin tip (the fin runs back along −x)
-  return m.localToWorld(out.set(-0.33, 0, 0));
+  // vệt nước kéo thẳng phía sau cá: lấy điểm trên trục thân (không theo nhịp vẫy đuôi / quạt vây)
+  if (e < 2) return tilt.localToWorld(out.set(0, TAIL_TIP_Y[e], -(TAIL_TIP_T - T_PIVOT) * L));
+  return pecs[e - 2].userData.obj.getWorldPosition(out);       // gốc vây ngực (không theo nhịp quạt)
 }
 // smoothed points (Catmull-Rom through the history) — reused, no per-frame allocation
 const trPts = Array.from({ length: TR_N }, () => ({ x: 0, y: 0, z: 0, age: 0, k: 0 }));
@@ -1231,6 +1241,7 @@ function finTrailStep(dt) {
 // the start, a puff of sand kicked up, a short body stretch and a small FOV kick
 // =============================================================================
 const fx = { amt: 0 };
+const SQ = { x: 0, v: 0, prev: 0, acc: 0, br: 0, fin: 0, finV: 0, yaw: 0 };   // nhún giãn + vây trễ
 const TRAIL_N = 28;
 const trailMat = new THREE.ShaderMaterial({
   transparent: true, depthWrite: false, side: THREE.DoubleSide,
@@ -1321,8 +1332,7 @@ function fxStep(dt) {
   }
   // streaks: tail tip and both pectoral fins
   fish.updateMatrixWorld();
-  const sp = spineAt(1);
-  tilt.localToWorld(_tail.set(sp.x, 0, sp.z));
+  tilt.localToWorld(_tail.set(0, 0, -(1 - T_PIVOT) * L));      // vệt lao kéo thẳng sau đuôi, không vẽ theo đường vẫy
   trailStep(trails[0], _tail, on ? fx.amt : 0, dt);
   for (let i = 0; i < 2; i++) { pecs[i].userData.obj.getWorldPosition(_pec); trailStep(trails[i + 1], _pec, on ? fx.amt : 0, dt); }
   // rings expand and fade
@@ -1345,8 +1355,20 @@ function fxStep(dt) {
     puffMesh.setMatrixAt(i, _m.compose(q.p, _q, _s));
   });
   puffMesh.instanceMatrix.needsUpdate = true;
-  // body stretches a little along the dash
-  tilt.scale.set(1 - 0.05 * fx.amt, 1 - 0.03 * fx.amt, 1 + 0.09 * fx.amt);
+  // ---- nhún giãn (squash & stretch) có lò xo: kéo dài khi lao, co tròn khi phanh, phập phồng khi thở
+  const spd = S.vel.length(), acc = (spd - SQ.prev) / Math.max(dt, 1e-3); SQ.prev = spd;
+  SQ.acc += (acc - SQ.acc) * (1 - Math.exp(-dt / 0.06));
+  const brake = THREE.MathUtils.clamp(-SQ.acc * 0.02, 0, 0.1);
+  const target = P.squash ? 0.11 * fx.amt - brake : 0;
+  SQ.v += (-170 * (SQ.x - target) - 9 * SQ.v) * dt; SQ.x += SQ.v * dt;          // lò xo hơi nảy (có vượt quá rồi dội lại)
+  SQ.br += dt * 2.3;
+  const br = P.squash ? 0.022 * Math.sin(SQ.br) * (1 - 0.7 * clamp01(S.swim)) : 0;   // thở: rõ khi đứng yên
+  const len = 1 + SQ.x, girth = 1 / Math.sqrt(len);                            // giữ thể tích: dài ra thì thon lại
+  tilt.scale.set(girth * (1 + br), girth * (1 + br * 0.8), len * (1 - br * 0.4));
+  // ---- chuyển động trễ của vây: rẽ gắt / dừng đột ngột làm vây và đuôi quất theo rồi đung đưa
+  const kick = P.finLag ? (S.yawRate - SQ.yaw) * 0.004 + brake * 1.6 : 0; SQ.yaw = S.yawRate;
+  SQ.finV += (-60 * SQ.fin - 3.2 * SQ.finV) * dt + kick; SQ.fin += SQ.finV * dt;
+  SQ.fin = THREE.MathUtils.clamp(SQ.fin, -0.6, 0.6);
 }
 
 // =============================================================================
@@ -1529,10 +1551,15 @@ const gf = gui.addFolder('FishFins (pectorals)');
 gf.add(P, 'pecSweep', 0, 90, 1).name('SweepDegrees');
 gf.add(P, 'pecOpenOnTurn', 0, 1, 0.05).name('OpenOnTurn');
 gf.add(P, 'pecFlutter', 0, 10, 0.1).name('FlutterDegrees');
+gf.add(P, 'squash').name('Nhún giãn (squash)');
+gf.add(P, 'finLag').name('Vây trễ (follow-through)');
 gf.add(P, 'pecRest', -10, 70, 1).name('rest angle back °');
 gf.add(P, 'pecFeather', 0, 90, 1).name('feather on return °');
 const gs = gui.addFolder('FishSwimMotion');
 gs.add(P, 'maxBank', 0, 45, 1).name('MaxBankDegrees');
+gs.add(P, 'headLead', 0, 0.08, 0.002).name('Đầu dẫn hướng khi rẽ');
+gs.add(P, 'headLeadMax', 0, 45, 1).name('Đầu nghiêng tối đa °');
+gs.add(P, 'frontBend', 0, 1, 0.05).name('Thân giữa cong theo');
 gs.add(P, 'bankPerTurnRate', 0, 0.2, 0.005).name('BankPerTurnRate');
 gs.add(P, 'bankSmooth', 0.01, 1, 0.01).name('BankSmoothSeconds');
 gs.add(P, 'idleSway', 0, 10, 0.1).name('IdleSwayDegrees');
@@ -1552,6 +1579,8 @@ gd.add(P, 'dashTime', 0.1, 0.6, 0.01).name('duration s');
 gd.add(P, 'dashCharges', 1, 5, 1).name('stamina charges').onChange(buildPips);
 gd.add(P, 'dashRegen', 0.5, 6, 0.1).name('refill s per charge');
 gd.add(P, 'dashTailBoost', 0, 5, 0.1).name('tail beat boost');
+gd.add(P, 'dashTailAmp', 0, 1, 0.05).name('Biên độ quẫy khi lao');
+gd.add(P, 'beatFall', 0.1, 2, 0.05).name('Đuôi chậm dần (s)');
 gd.add(P, 'dashSteer', 0, 720, 10).name('steer while dashing °/s');
 gd.add(P, 'dashFx').name('dash effects');
 gd.add(P, 'dashFov', 0, 15, 0.5).name('camera kick °');

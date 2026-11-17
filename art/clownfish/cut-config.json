@@ -1,0 +1,14 @@
+{
+  "finsCells": [
+    {"name": "tail", "rot": 0},
+    {"name": "dorsalB", "rot": 90},
+    {"name": "dorsalF", "rot": 90},
+    {"name": "pec", "rot": 0},
+    {"name": "pelvic", "rot": -90},
+    {"name": "anal", "rot": -90}
+  ],
+  "eyesCells": ["e_normal", "e_scared", "e_narrow", "e_dizzy", "e_closed", "m_closed", "m_open"],
+  "sideFinNames": ["sf_dorsal", "sf_tail", "sf_anal", "sf_pelvic"],
+  "mouthBox": [0.9, 0.42, 0.72, 0.955],
+  "snoutRef": 0.885
+}

@@ -69,7 +69,9 @@ function buildGoldPainted() {
   const sm = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
   // vùng môi (u > 0.9): mặt cắt tròn đầy hơn, môi dày ngang, có rãnh miệng chạy theo đường miệng trong tranh
   const lipK = u => sm(.9, .95, u);
-  const widthK = u => .72 * (u < .14 ? lerp(.55, 1, u / .14) : 1) * 1;   // không nới rộng vùng môi
+  // béo tròn: mặt cắt hình quả trứng — bụng rộng hơn lưng (t = vị trí dọc chuẩn hoá, −1 bụng → 1 lưng)
+  const EGG = .2, egg = t => 1 - EGG * Math.max(-1, Math.min(1, t));
+  const widthK = u => .84 * (u < .14 ? lerp(.55, 1, u / .14) : 1) * 1;   // không nới rộng vùng môi
   const creaseV = u => lerp(.572, .532, clamp((u - .92) / (.985 - .92), 0, 1));   // đường miệng (đo từ tranh)
   // thân dừng trước môi (uE) và bo tròn mũi; môi là khối 3D riêng (xem phần "môi 3D" bên dưới)
   const uE = .935;
@@ -100,7 +102,7 @@ function buildGoldPainted() {
     const hw = Math.max(Math.min(hh * widthK(u), u > uA ? wA * 1.05 : 9), snoutW(u)), ex = lerp(.85, .62, lipK(u));
     for (let j = 0; j <= RAD2; j++) {
       const a = -Math.PI / 2 + j / RAD2 * TAU, s = Math.sin(a), c = Math.cos(a);
-      pos.push(u - .5 + dx, cy + hh * s * sY, hw * Math.sign(c) * Math.pow(Math.abs(c), ex) * Math.pow(sZ, ex));
+      pos.push(u - .5 + dx, cy + hh * s * sY, hw * egg(s * sY) * Math.sign(c) * Math.pow(Math.abs(c), ex) * Math.pow(sZ, ex));
       uv.push(u + dx, 1 - lerp(vt + inset, vb - inset, (1 - s * sY) / 2));   // vòm: chiếu tranh theo độ cao thật (không kéo sọc)
     }
   };
@@ -215,14 +217,14 @@ function buildGoldPainted() {
     const lut = (u, o) => { const f = clamp((u - LU0) / (uD - LU0), 0, 1) * LN, i = Math.min(LN - 1, f | 0), k = f - i;
       for (let c = 0; c < 4; c++) o[c] = LUT[i * 4 + c] * (1 - k) + LUT[i * 4 + 4 + c] * k; return o; };
     const P0 = new Float32Array(4), P1 = new Float32Array(4), P2 = new Float32Array(4), EX = .0012;
-    const faceF = (u, y, z, P) => { const dy = (y - P[0]) / P[1], dz = Math.abs(z) / P[2]; let F = dy * dy + Math.pow(dz, 2 / P[3]) - 1; if (u > uD) F += 1 - fDome.sq(u); return F; };   // vòm: cùng mặt với F/f² nhưng mượt cả qua chóp (trước đây bị cắt cụt ở uTipD → vệt ở khoé/nếp môi)
+    const faceF = (u, y, z, P) => { const dy = (y - P[0]) / P[1], dz = Math.abs(z) / (P[2] * egg(dy)); let F = dy * dy + Math.pow(dz, 2 / P[3]) - 1; if (u > uD) F += 1 - fDome.sq(u); return F; };   // vòm: cùng mặt với F/f² nhưng mượt cả qua chóp (trước đây bị cắt cụt ở uTipD → vệt ở khoé/nếp môi)
     const faceD = (x, y, z) => {
       const u = x + .5; lut(Math.min(u, uD), P0); const F = faceF(u, y, z, P0);
       if (F > 400) return .08;                                 // xa hẳn mặt: trị ước lượng ở đây đã > .08 nên không tạo bậc
       lut(Math.min(u + EX, uD), P1); lut(Math.min(u - EX, uD), P2);
       const gx = (faceF(u + EX, y, z, P1) - faceF(u - EX, y, z, P2)) / (2 * EX);
-      const dy = (y - P0[0]) / P0[1], dz = Math.abs(z) / P0[2], e2 = 2 / P0[3];
-      const gy = 2 * dy / P0[1], gz = dz > 1e-6 ? e2 * Math.pow(dz, e2 - 1) / P0[2] : 0;
+      const dy = (y - P0[0]) / P0[1], W2 = P0[2] * egg(dy), dz = Math.abs(z) / W2, e2 = 2 / P0[3];
+      const gy = 2 * dy / P0[1], gz = dz > 1e-6 ? e2 * Math.pow(dz, e2 - 1) / W2 : 0;
       return clamp(F / Math.max(1e-3, Math.hypot(gx, gy, gz)), -.08, .08);
     };
     const sdE = (px, py, pz, rx, ry, rz) => { const ax = px / rx, ay = py / ry, az = pz / rz, k0 = Math.sqrt(ax * ax + ay * ay + az * az), bx = ax / rx, by = ay / ry, bz = az / rz; return k0 * (k0 - 1) / Math.max(Math.sqrt(bx * bx + by * by + bz * bz), 1e-6); };
@@ -351,7 +353,7 @@ function buildGoldPainted() {
   const surf = (u, y, side = 1) => {                          // điểm trên bề mặt hông tại (u, y)
     const [vt, vb] = at(u), yT = (.5 - vt) * H, yB = (.5 - vb) * H, cy = (yT + yB) / 2, hh = (yT - yB) / 2, hw = hh * widthK(u);
     const s = clamp((y - cy) / hh, -1, 1), c = Math.sqrt(1 - s * s);
-    return new THREE.Vector3(u - .5, y, side * hw * Math.pow(c, .85));
+    return new THREE.Vector3(u - .5, y, side * hw * egg(s) * Math.pow(c, .85));
   };
   const topY = u => (.5 - at(u)[0]) * H, botY = u => (.5 - at(u)[1]) * H;
   // vây: tấm phẳng, gốc (mép phải của tranh) đặt tại gốc toạ độ

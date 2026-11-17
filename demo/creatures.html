@@ -197,11 +197,13 @@
 </section>
 
 <script src="goldfish.js"></script>
+<script src="clownfish.js"></script>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 const { buildGoldPainted, setGoldAniso } = window.GoldfishLib(THREE, { mergeGeometries, mergeVertices });   // goldfish.js (script thường)
+const { buildClownPainted } = window.ClownfishLib(THREE, { mergeGeometries, mergeVertices });   // clownfish.js (script thường)
 
 /* =====================================================================
    Tiện ích
@@ -1560,7 +1562,7 @@ const stage = new THREE.Group(); stage.visible = false; scene.add(stage);
 const stageShadow = makeShadow(1, 1); stage.add(stageShadow);
 const cache = {};
 const BUILD = {
-  gold: buildGoldPainted, neon: () => buildFish(SPECIES.neon()), guppy: () => buildFish(SPECIES.guppy()), angel: () => buildFish(SPECIES.angel()),
+  gold: buildGoldPainted, clown: buildClownPainted, neon: () => buildFish(SPECIES.neon()), guppy: () => buildFish(SPECIES.guppy()), angel: () => buildFish(SPECIES.angel()),
   platy: () => buildFish(SPECIES.platy()), parrot: () => buildFish(SPECIES.parrot()), lahan: () => buildFish(SPECIES.lahan()), shrimp: buildShrimp, turtle: buildTurtle, food: () => buildFood(7),
   castle: buildCastle, sub: buildSub, airstone: () => { const a = buildAirStone(); a.userData.height = 1.8; return a; }, chest: buildChest, shell: buildShell, rock: buildFlatRock,
   plants: () => { const g = new THREE.Group(); const a = buildPlant('broad', 51, 1.1); a.position.x = -.5; const b = buildPlant('coral', 52, 1.0); b.position.set(.7, 0, .3); const c = buildPlant('tuft', 53, 1.0); c.position.set(.3, 0, -.6); g.add(a, b, c); g.userData = { kind: 'decor', update() { } }; return g; },
@@ -1604,6 +1606,7 @@ function showItem(id) {
 const ITEMS = [
   { id: 'tank', name: 'Cả bể', group: 'Cảnh', dot: '#3a7470' },
   { id: 'gold', name: 'Bé cá vàng', group: 'Sinh vật', dot: '#ec7d2c', tier: 'Cấp 1 → 5', size: 'Kích thước 1,0 → 4,5', faces: true, desc: 'Nhân vật chính. Thân cam vảy rõ, bụng kem, đuôi đôi mềm như lụa. Là con duy nhất có đôi mắt to biểu cảm, má chỉ hơi ửng.' },
+  { id: 'clown', name: 'Cá hề', group: 'Sinh vật', dot: '#f2711c', tier: 'Cá chơi được · khu 8', size: 'Mở khoá ở Rạn san hô', faces: true, desc: 'Thân cam tươi với ba sọc trắng viền đen, vây tròn viền đen, đuôi hình quạt. Miễn nhiễm hải quỳ và trốn được trong đó.' },
   { id: 'food', name: 'Cám cá', group: 'Sinh vật', dot: '#d8823a', tier: 'Cấp 0', size: 'Kích thước 0,15', desc: 'Vụn cám cam rơi thành cụm từ mặt nước. Ăn liên tiếp dễ vào chuỗi.' },
   { id: 'neon', name: 'Cá neon', group: 'Sinh vật', dot: '#3fc2f2', tier: 'Cấp 1', size: 'Kích thước 0,7', desc: 'Thân thon, sọc xanh hơi phát sáng, nửa sau bụng đỏ. Bơi thành đàn 10–15 con – đàn mồi chính để ăn chuỗi.' },
   { id: 'guppy', name: 'Cá bảy màu', group: 'Sinh vật', dot: '#e66e55', tier: 'Cấp 1', size: 'Kích thước 0,8', desc: 'Thân bạc nhỏ, đuôi xòe màu san hô. Đổi hướng gắt.' },
@@ -1704,7 +1707,7 @@ const studioShadow = new THREE.Mesh(SHADOW_GEO, MAT.shadow.clone()); studioShado
 const camStudio = new THREE.PerspectiveCamera(30, 16 / 9, .05, 200);
 const ctlStudio = new OrbitControls(camStudio, canvas);
 Object.assign(ctlStudio, { enabled: false, enableDamping: true, autoRotate: true, autoRotateSpeed: 1.4, minDistance: 1.8, maxDistance: 16, minPolarAngle: 0, maxPolarAngle: Math.PI });
-const STUDIO_IDS = ['gold', 'neon', 'guppy', 'platy', 'angel', 'parrot', 'lahan', 'shrimp', 'turtle'];
+const STUDIO_IDS = ['gold', 'clown', 'neon', 'guppy', 'platy', 'angel', 'parrot', 'lahan', 'shrimp', 'turtle'];
 const STUDIO_TARGET = new THREE.Vector3(0, 1.5, 0), studioCache = {};
 let studioObj = null, studioId = null, studioSwim = true, viewGoal = null;
 const sPick = $('sPick');
